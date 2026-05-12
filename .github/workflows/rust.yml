@@ -1,4 +1,4 @@
-name: Build One-KVM for armhf (glibc 2.31 with cmake and libjpeg)
+name: Build One-KVM for armhf (full dependencies + clang)
 
 on:
   push:
@@ -36,7 +36,6 @@ jobs:
           cat > build/cross/Dockerfile.armhf.bullseye << 'EOF'
           FROM debian:bullseye
 
-          # 启用 armhf 架构并安装依赖
           RUN dpkg --add-architecture armhf && \
               apt-get update && \
               apt-get install -y --no-install-recommends \
@@ -45,29 +44,42 @@ jobs:
                   gcc-arm-linux-gnueabihf \
                   libc6-dev-armhf-cross \
                   pkg-config \
-                  libudev-dev:armhf \
-                  libdrm-dev:armhf \
-                  libssl-dev:armhf \
-                  libasound2-dev:armhf \
-                  libopus-dev:armhf \
+                  cmake \
                   autoconf \
                   automake \
                   libtool \
-                  cmake \
-                  libjpeg62-turbo-dev:armhf \
                   ca-certificates \
+                  clang \
+                  libclang-dev \
+                  libasound2-dev:armhf \
+                  libopus-dev:armhf \
+                  libpulse-dev:armhf \
+                  libdrm-dev:armhf \
+                  libjpeg62-turbo-dev:armhf \
+                  libpng-dev:armhf \
+                  libv4l-dev:armhf \
+                  libusb-1.0-0-dev:armhf \
+                  libudev-dev:armhf \
+                  libssl-dev:armhf \
+                  libx11-dev:armhf \
+                  libxcb-shape0-dev:armhf \
+                  libxcb-xfixes0-dev:armhf \
+                  libxrandr-dev:armhf \
+                  libxinerama-dev:armhf \
+                  libxcursor-dev:armhf \
+                  libxi-dev:armhf \
+                  libgl1-mesa-dev:armhf \
+                  libegl1-mesa-dev:armhf \
+                  libgles2-mesa-dev:armhf \
               && rm -rf /var/lib/apt/lists/*
 
-          # 设置 pkg-config 交叉编译环境变量
           ENV PKG_CONFIG_ALLOW_CROSS=1
           ENV PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig
           ENV PKG_CONFIG_SYSROOT_DIR=/
 
-          # 安装 Rust
           RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           ENV PATH="/root/.cargo/bin:${PATH}"
 
-          # 添加 ARMv7 目标
           RUN rustup target add armv7-unknown-linux-gnueabihf
           EOF
 
