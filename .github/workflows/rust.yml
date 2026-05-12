@@ -1,4 +1,4 @@
-name: Build One-KVM for armhf (statically linked, no Docker)
+name: Build One-KVM for armhf (Using Cross)
 
 on:
   push:
@@ -11,14 +11,14 @@ env:
 
 jobs:
   build:
-    name: Build statically linked armhf binary
+    name: Cross compile for armhf
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. 安装 Node.js 并构建前端
+      # 1. 构建前端静态文件
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -31,99 +31,42 @@ jobs:
           npm run build
           cd ..
 
-      # 2. 安装 Zig（用于交叉编译和静态链接）
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: '0.13.0'
+      # 2. 安装 cross 工具
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      # 3. 安装 cargo-zigbuild
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild
+      # 3. 交叉编译
+      - name: Cross Compile
+        run: cross build --release --target armv7-unknown-linux-gnueabihf
 
-      # 4. 安装 armhf 系统库开发文件（用于静态链接）
-      #    注意：我们只安装头文件和 .a 静态库，不依赖动态库
-      - name: Install armhf static libraries
-        run: |
-          sudo dpkg --add-architecture armhf
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf \
-            libc6-dev-armhf-cross \
-            libudev-dev:armhf \
-            libdrm-dev:armhf \
-            libasound2-dev:armhf \
-            libopus-dev:armhf \
-            libpulse-dev:armhf \
-            libjpeg62-turbo-dev:armhf \
-            libusb-1.0-0-dev:armhf \
-            libssl-dev:armhf
-
-      # 5. 使用 zigbuild 进行静态交叉编译
-      #    目标：armv7-unknown-linux-gnueabihf
-      #    参数：--target 指定架构，--release 优化
-      #    环境变量：PKG_CONFIG_ALLOW_CROSS=1 允许 pkg-config 交叉
-      #             PKG_CONFIG_PATH 指向 armhf 的 .pc 文件
-      - name: Build with cargo-zigbuild
-        run: |
-          export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig
-          cargo zigbuild --target armv7-unknown-linux-gnueabihf --release
-
-      # 6. 提取版本号
-      - name: Get version from Cargo.toml
+      # 4. 获取版本号并打包 .deb
+      - name: Get version
         id: get_version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      # 7. 准备 .deb 包目录结构
       - name: Prepare .deb package
         run: |
           PKG_NAME="one-kvm_${{ steps.get_version.outputs.version }}_armhf"
           mkdir -p $PKG_NAME/DEBIAN
           mkdir -p $PKG_NAME/usr/local/bin
 
-          # 复制静态编译的二进制
           cp target/armv7-unknown-linux-gnueabihf/release/one-kvm $PKG_NAME/usr/local/bin/
 
-          # 添加 control 文件
           cat << EOF > $PKG_NAME/DEBIAN/control
           Package: one-kvm
           Version: ${{ steps.get_version.outputs.version }}
           Architecture: armhf
           Maintainer: SilentWind <silentwind@example.com>
-          Description: A lightweight IP-KVM solution (statically linked)
-           One-KVM Open is a Rust-based, lightweight IP-KVM solution.
-           This binary is statically linked and does not depend on external GLIBC.
+          Description: A lightweight IP-KVM solution built for armhf.
           EOF
 
-      # 8. 打包 .deb
       - name: Build .deb package
-        run: |
-          sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_armhf
+        run: sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_armhf
 
-      # 9. 上传产物
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: one-kvm-armhf-static-${{ steps.get_version.outputs.version }}
+          name: one-kvm-armhf-${{ steps.get_version.outputs.version }}
           path: ./*.deb
-
-  release:
-    name: Create GitHub Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*.deb
-          generate_release_notes: true
