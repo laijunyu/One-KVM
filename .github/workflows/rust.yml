@@ -1,4 +1,4 @@
-name: Build One-KVM for armhf (glibc 2.31 with pkg-config fix)
+name: Build One-KVM for armhf (glibc 2.31 with alsa)
 
 on:
   push:
@@ -48,6 +48,7 @@ jobs:
                   libudev-dev:armhf \
                   libdrm-dev:armhf \
                   libssl-dev:armhf \
+                  libasound2-dev:armhf \
                   ca-certificates \
               && rm -rf /var/lib/apt/lists/*
 
