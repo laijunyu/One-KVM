@@ -1,4 +1,4 @@
-name: Build One-KVM for armhf (glibc 2.31 with full deps)
+name: Build One-KVM for armhf (glibc 2.31 with cmake and libjpeg)
 
 on:
   push:
@@ -53,6 +53,8 @@ jobs:
                   autoconf \
                   automake \
                   libtool \
+                  cmake \
+                  libjpeg62-turbo-dev:armhf \
                   ca-certificates \
               && rm -rf /var/lib/apt/lists/*
 
