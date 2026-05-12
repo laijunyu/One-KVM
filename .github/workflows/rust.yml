@@ -1,6 +1,5 @@
 name: Build One-KVM for armhf (GLIBC 2.36)
 
-# 触发条件：推送 v 开头的标签时自动执行，同时支持手动触发
 on:
   push:
     tags:
@@ -14,13 +13,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. 在 x86 的 Runner 上安装 QEMU，以模拟 ARM 环境
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
 
-      # 2. 在 Debian 12 (GLIBC 2.36) armhf 容器中编译并打包
       - name: Build inside armhf container and package .deb
         run: |
           docker run --rm --platform linux/arm/v7 \
@@ -28,7 +25,7 @@ jobs:
             -w /workspace \
             arm32v7/debian:bookworm-slim \
             bash -c "
-              # ---------- 安装编译与系统依赖 ----------
+              # ---------- 安装系统依赖 ----------
               apt-get update
               apt-get install -y --no-install-recommends \
                 build-essential \
@@ -50,17 +47,27 @@ jobs:
                 libudev-dev \
                 libdrm-dev \
                 zlib1g-dev \
-                linux-libc-dev
+                linux-libc-dev \
+                nodejs \
+                npm
+
+              # ---------- 编译前端 Vue 项目 ----------
+              cd /workspace/web
+              npm install
+              npm run build
+              # 确保生成 dist 目录
+              if [ ! -d dist ]; then
+                echo 'Frontend build failed: dist not found' && exit 1
+              fi
 
               # ---------- 安装 Rust 工具链 ----------
+              cd /workspace
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
               source \$HOME/.cargo/env
               rustup target add armv7-unknown-linux-gnueabihf
 
               # ---------- 构建静态依赖库 ----------
-              # 这些库会被静态链接到最终的可执行文件中，避免运行时对系统库的依赖
-
-              # 1. 构建静态 libjpeg-turbo
+              # 1. libjpeg-turbo
               git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/libjpeg-turbo
               cd /tmp/libjpeg-turbo && mkdir build && cd build
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -68,7 +75,7 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/libjpeg-turbo
 
-              # 2. 构建静态 libyuv
+              # 2. libyuv
               git clone --depth 1 https://github.com/lemenkov/libyuv /tmp/libyuv
               cd /tmp/libyuv && mkdir build && cd build
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -76,7 +83,7 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/libyuv
 
-              # 3. 构建静态 libvpx
+              # 3. libvpx
               git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
               cd /tmp/libvpx
               ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic \
@@ -84,14 +91,14 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/libvpx
 
-              # 4. 构建静态 libx264
+              # 4. libx264
               git clone --depth 1 https://code.videolan.org/videolan/x264.git /tmp/x264
               cd /tmp/x264
               ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic --disable-cli
               make -j\$(nproc) && make install
               rm -rf /tmp/x264
 
-              # 5. 构建静态 libx265
+              # 5. libx265
               git clone --depth 1 https://bitbucket.org/multicoreware/x265_git /tmp/x265
               cd /tmp/x265/source && mkdir -p build && cd build
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -99,8 +106,7 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/x265
 
-              # ---------- 设置编译环境变量 ----------
-              # 告诉 Rust 编译器使用静态链接和本地构建的库
+              # ---------- 设置编译环境 ----------
               export PKG_CONFIG_ALLOW_CROSS=1
               export PKG_CONFIG_ALL_STATIC=1
               export FFMPEG_STATIC=1
@@ -113,7 +119,6 @@ jobs:
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
               # ---------- 制作 .deb 包 ----------
-              # 从项目代码中提取版本号
               PKG_VER=\$(grep -m1 '^version =' Cargo.toml | cut -d'\"' -f2)
               echo \"Detected version: \$PKG_VER\"
 
@@ -128,21 +133,17 @@ jobs:
               mkdir -p \$PKG_DIR/etc/one-kvm/ventoy
               mkdir -p \$PKG_DIR/lib/systemd/system
 
-              # 拷贝主程序
               cp \$BINARY_PATH \$PKG_DIR/usr/bin/one-kvm
               chmod 755 \$PKG_DIR/usr/bin/one-kvm
 
-              # 拷贝 Ventoy 资源
               if [ -d /workspace/libs/ventoy-img-rs/resources ]; then
                 cp -r /workspace/libs/ventoy-img-rs/resources/* \$PKG_DIR/etc/one-kvm/ventoy/
               fi
 
-              # 拷贝 systemd 服务文件
               if [ -f /workspace/build/one-kvm.service ]; then
                 cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/
               fi
 
-              # 创建安装后脚本
               cat > \$PKG_DIR/DEBIAN/postinst <<'POSTINST_EOF'
               #!/bin/bash
               set -e
@@ -158,7 +159,6 @@ jobs:
               POSTINST_EOF
               chmod 755 \$PKG_DIR/DEBIAN/postinst
 
-              # 创建卸载前脚本
               cat > \$PKG_DIR/DEBIAN/prerm <<'PRERM_EOF'
               #!/bin/bash
               set -e
@@ -174,7 +174,6 @@ jobs:
               PRERM_EOF
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
-              # 生成 DEBIAN/control 文件
               cat << EOF > \$PKG_DIR/DEBIAN/control
               Package: one-kvm
               Version: \${PKG_VER}
@@ -199,18 +198,15 @@ jobs:
               Homepage: https://github.com/mofeng-git/One-KVM
               EOF
 
-              # 打包 .deb
               dpkg-deb --root-owner-group --build \$PKG_DIR /workspace/one-kvm_armhf.deb
             "
 
-      # 3. 上传 .deb 作为构建工件
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-armhf-deb
           path: one-kvm_armhf.deb
 
-      # 4. 如果由 tag 触发，自动创建 Release 并上传
       - name: Create Release and Upload .deb
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -220,7 +216,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body: |
             专为 armhf 架构构建的 One-KVM .deb 包，于 Debian 12 (GLIBC 2.36) 环境中编译。
-            此版本将依赖库静态链接，避免 GLIBC 版本不兼容的问题。
+            此版本已包含前端页面，并将依赖库静态链接，彻底解决 GLIBC 版本不匹配问题。
             适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 的 ARM 设备。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
