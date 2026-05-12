@@ -18,11 +18,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 设置 Node.js 环境（用于构建前端）
+      # ✅ 升级 Node.js 到 20（Vite 要求 20.19+）
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'          # 原为 '18'，现改为 '20'
 
       # 构建前端静态文件（生成 web/dist）
       - name: Build frontend
@@ -32,24 +32,20 @@ jobs:
           npm run build   # 执行构建脚本，生成 dist 目录
           cd ..
 
-      # 安装 cross（交叉编译工具）
       - name: Install cross
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
 
-      # 使用 cross 交叉编译
       - name: Cross compile
         run: |
           cross build --release --target armv7-unknown-linux-gnueabihf
 
-      # 提取版本号
       - name: Get version from Cargo.toml
         id: get_version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      # 准备 .deb 包目录
       - name: Prepare .deb package
         run: |
           PKG_NAME="one-kvm_${{ steps.get_version.outputs.version }}_armhf"
@@ -68,12 +64,10 @@ jobs:
            This package was built for Armbian 12 (armhf) using cross-rs.
           EOF
 
-      # 打包 .deb
       - name: Build .deb package
         run: |
           sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_armhf
 
-      # 上传产物
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
