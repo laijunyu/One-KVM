@@ -1,6 +1,6 @@
-name: Build one-kvm armhf .deb (GLIBC 2.36)
+name: Build One-KVM for armhf (GLIBC 2.36)
 
-# 触发条件：推送 v 开头的标签时自动构建，也可以手动触发
+# 触发条件：推送 v 开头的标签时自动执行，同时支持手动触发
 on:
   push:
     tags:
@@ -14,13 +14,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 让 x86 的 Runner 能够运行 ARM 容器
+      # 1. 在 x86 的 Runner 上安装 QEMU，以模拟 ARM 环境
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
 
-      # 在 Debian 12 (GLIBC 2.36) armhf 环境中编译并打包
+      # 2. 在 Debian 12 (GLIBC 2.36) armhf 容器中编译并打包
       - name: Build inside armhf container and package .deb
         run: |
           docker run --rm --platform linux/arm/v7 \
@@ -28,56 +28,189 @@ jobs:
             -w /workspace \
             arm32v7/debian:bookworm-slim \
             bash -c "
-              # ---------- 安装编译依赖 ----------
+              # ---------- 安装编译与系统依赖 ----------
               apt-get update
               apt-get install -y --no-install-recommends \
                 build-essential \
-                git \
+                curl \
                 ca-certificates \
-                libdrm-dev \
+                pkg-config \
+                git \
+                cmake \
+                nasm \
+                meson \
+                ninja-build \
+                autoconf \
+                automake \
+                libtool \
+                libclang-dev \
+                llvm-dev \
+                libasound2-dev \
+                libv4l-dev \
                 libudev-dev \
-                pkg-config
+                libdrm-dev \
+                zlib1g-dev \
+                linux-libc-dev
 
-              # ★★★ 以下构建命令请根据 one-kvm 实际技术栈调整 ★★★
-              # 假设项目使用 Makefile 或者可以直接编译：
-              make
-              # 如果最终产物名叫 one-kvm，则检查是否存在
-              if [ ! -f ./one-kvm ]; then
+              # ---------- 安装 Rust 工具链 ----------
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              source \$HOME/.cargo/env
+              rustup target add armv7-unknown-linux-gnueabihf
+
+              # ---------- 构建静态依赖库 ----------
+              # 这些库会被静态链接到最终的可执行文件中，避免运行时对系统库的依赖
+
+              # 1. 构建静态 libjpeg-turbo
+              git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/libjpeg-turbo
+              cd /tmp/libjpeg-turbo && mkdir build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_SHARED=OFF -DENABLE_STATIC=ON
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libjpeg-turbo
+
+              # 2. 构建静态 libyuv
+              git clone --depth 1 https://github.com/lemenkov/libyuv /tmp/libyuv
+              cd /tmp/libyuv && mkdir build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=OFF
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libyuv
+
+              # 3. 构建静态 libvpx
+              git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
+              cd /tmp/libvpx
+              ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic \
+                --disable-examples --disable-tools --disable-docs --disable-unit-tests
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libvpx
+
+              # 4. 构建静态 libx264
+              git clone --depth 1 https://code.videolan.org/videolan/x264.git /tmp/x264
+              cd /tmp/x264
+              ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic --disable-cli
+              make -j\$(nproc) && make install
+              rm -rf /tmp/x264
+
+              # 5. 构建静态 libx265
+              git clone --depth 1 https://bitbucket.org/multicoreware/x265_git /tmp/x265
+              cd /tmp/x265/source && mkdir -p build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              make -j\$(nproc) && make install
+              rm -rf /tmp/x265
+
+              # ---------- 设置编译环境变量 ----------
+              # 告诉 Rust 编译器使用静态链接和本地构建的库
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_ALL_STATIC=1
+              export FFMPEG_STATIC=1
+              export LIBYUV_STATIC=1
+              export OPUS_STATIC=1
+              export RUSTFLAGS='-C target-feature=+crt-static'
+
+              # ---------- 编译 One-KVM ----------
+              cd /workspace
+              cargo build --release --target armv7-unknown-linux-gnueabihf
+
+              # ---------- 制作 .deb 包 ----------
+              # 从项目代码中提取版本号
+              PKG_VER=\$(grep -m1 '^version =' Cargo.toml | cut -d'\"' -f2)
+              echo \"Detected version: \$PKG_VER\"
+
+              BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
+              if [ ! -f \"\$BINARY_PATH\" ]; then
                 echo 'Build failed: one-kvm not found' && exit 1
               fi
 
-              # ---------- 制作 .deb 包 ----------
-              PKG_NAME=one-kvm
-              PKG_VER=1.0.0   # 可改为从 git tag 自动获取
-              DEB_DIR=/tmp/deb
+              PKG_DIR=/tmp/one-kvm-pkg
+              mkdir -p \$PKG_DIR/DEBIAN
+              mkdir -p \$PKG_DIR/usr/bin
+              mkdir -p \$PKG_DIR/etc/one-kvm/ventoy
+              mkdir -p \$PKG_DIR/lib/systemd/system
 
-              mkdir -p \$DEB_DIR/usr/local/bin
-              cp ./one-kvm \$DEB_DIR/usr/local/bin/
+              # 拷贝主程序
+              cp \$BINARY_PATH \$PKG_DIR/usr/bin/one-kvm
+              chmod 755 \$PKG_DIR/usr/bin/one-kvm
 
-              mkdir -p \$DEB_DIR/DEBIAN
-              cat << EOF > \$DEB_DIR/DEBIAN/control
+              # 拷贝 Ventoy 资源
+              if [ -d /workspace/libs/ventoy-img-rs/resources ]; then
+                cp -r /workspace/libs/ventoy-img-rs/resources/* \$PKG_DIR/etc/one-kvm/ventoy/
+              fi
+
+              # 拷贝 systemd 服务文件
+              if [ -f /workspace/build/one-kvm.service ]; then
+                cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/
+              fi
+
+              # 创建安装后脚本
+              cat > \$PKG_DIR/DEBIAN/postinst <<'POSTINST_EOF'
+              #!/bin/bash
+              set -e
+              case \"\$1\" in
+                configure)
+                  if [ -f /lib/systemd/system/one-kvm.service ]; then
+                    systemctl enable one-kvm || true
+                    systemctl start one-kvm || true
+                  fi
+                  ;;
+              esac
+              exit 0
+              POSTINST_EOF
+              chmod 755 \$PKG_DIR/DEBIAN/postinst
+
+              # 创建卸载前脚本
+              cat > \$PKG_DIR/DEBIAN/prerm <<'PRERM_EOF'
+              #!/bin/bash
+              set -e
+              case \"\$1\" in
+                remove|deconfigure)
+                  if [ -f /lib/systemd/system/one-kvm.service ]; then
+                    systemctl stop one-kvm || true
+                    systemctl disable one-kvm || true
+                  fi
+                  ;;
+              esac
+              exit 0
+              PRERM_EOF
+              chmod 755 \$PKG_DIR/DEBIAN/prerm
+
+              # 生成 DEBIAN/control 文件
+              cat << EOF > \$PKG_DIR/DEBIAN/control
               Package: one-kvm
               Version: \${PKG_VER}
-              Section: utils
+              Section: admin
               Priority: optional
               Architecture: armhf
-              Maintainer: your-name <your-email@example.com>
-              Description: One-KVM for armhf (GLIBC 2.36)
-               This package was built on Debian 12 armhf to ensure
-               full compatibility with GLIBC 2.36 systems.
+              Maintainer: SilentWind
+              Depends: ca-certificates
+              Description: A open and lightweight IP-KVM solution written in Rust
+               Enables BIOS-level remote management of servers and workstations.
+               .
+               One-KVM provides video capture, HID emulation (keyboard/mouse),
+               mass storage device forwarding, and ATX power control for remote
+               server management over IP.
+               .
+               Features:
+                * Hardware-accelerated video encoding (VAAPI, QSV, RKMPP)
+                * WebRTC and MJPEG streaming with low latency
+                * USB HID emulation via OTG gadget
+                * Mass storage device for ISO/IMG mounting
+                * ATX power control via GPIO or USB relay
+              Homepage: https://github.com/mofeng-git/One-KVM
               EOF
 
-              dpkg-deb --root-owner-group --build \$DEB_DIR /workspace/one-kvm_armhf.deb
+              # 打包 .deb
+              dpkg-deb --root-owner-group --build \$PKG_DIR /workspace/one-kvm_armhf.deb
             "
 
-      # 上传 .deb 作为构建工件（可在 Actions 页面下载）
+      # 3. 上传 .deb 作为构建工件
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-armhf-deb
           path: one-kvm_armhf.deb
 
-      # 如果是由 tag 触发，自动创建 Release 并上传 .deb
+      # 4. 如果由 tag 触发，自动创建 Release 并上传
       - name: Create Release and Upload .deb
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -86,7 +219,8 @@ jobs:
           name: "Release ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
           body: |
-            armhf 架构的 one-kvm .deb 包，在 Debian 12 (GLIBC 2.36) 环境中编译。
-            适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 等系统的 ARM 设备。
+            专为 armhf 架构构建的 One-KVM .deb 包，于 Debian 12 (GLIBC 2.36) 环境中编译。
+            此版本将依赖库静态链接，避免 GLIBC 版本不兼容的问题。
+            适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 的 ARM 设备。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
