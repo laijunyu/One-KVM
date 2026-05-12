@@ -1,10 +1,10 @@
-name: Build One-KVM for armhf (no custom Docker)
+name: Build One-KVM for armhf (with frontend)
 
 on:
   push:
     tags:
-      - 'v*'                     # 推送版本标签时触发，如 v0.2.0
-  workflow_dispatch:             # 支持手动触发
+      - 'v*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,12 +18,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 设置 Node.js 环境（用于构建前端）
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # 构建前端静态文件（生成 web/dist）
+      - name: Build frontend
+        run: |
+          cd web
+          npm ci          # 根据 package-lock.json 安装依赖，没有则用 npm install
+          npm run build   # 执行构建脚本，生成 dist 目录
+          cd ..
+
       # 安装 cross（交叉编译工具）
       - name: Install cross
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
 
-      # 使用 cross 进行交叉编译，目标为 armv7-unknown-linux-gnueabihf
+      # 使用 cross 交叉编译
       - name: Cross compile
         run: |
           cross build --release --target armv7-unknown-linux-gnueabihf
@@ -35,17 +49,15 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      # 准备 .deb 包目录结构
+      # 准备 .deb 包目录
       - name: Prepare .deb package
         run: |
           PKG_NAME="one-kvm_${{ steps.get_version.outputs.version }}_armhf"
           mkdir -p $PKG_NAME/DEBIAN
           mkdir -p $PKG_NAME/usr/local/bin
 
-          # 复制编译好的二进制文件
           cp target/armv7-unknown-linux-gnueabihf/release/one-kvm $PKG_NAME/usr/local/bin/
 
-          # 写入 DEBIAN/control 文件
           cat << EOF > $PKG_NAME/DEBIAN/control
           Package: one-kvm
           Version: ${{ steps.get_version.outputs.version }}
@@ -56,19 +68,18 @@ jobs:
            This package was built for Armbian 12 (armhf) using cross-rs.
           EOF
 
-      # 打包为 .deb
+      # 打包 .deb
       - name: Build .deb package
         run: |
           sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_armhf
 
-      # 上传 .deb 作为工作流产物
+      # 上传产物
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-armhf-${{ steps.get_version.outputs.version }}
           path: ./*.deb
 
-  # 可选：自动创建 Release 并上传
   release:
     name: Create GitHub Release
     needs: build
