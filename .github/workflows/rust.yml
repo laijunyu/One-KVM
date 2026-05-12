@@ -1,4 +1,4 @@
-name: Build One-KVM for armhf (with frontend)
+name: Build One-KVM for armhf (glibc 2.28)
 
 on:
   push:
@@ -11,34 +11,68 @@ env:
 
 jobs:
   build:
-    name: Cross compile for armhf
+    name: Cross compile for armhf with Debian 10
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ✅ 升级 Node.js 到 20（Vite 要求 20.19+）
+      # 构建前端（需要 Node.js 20）
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'          # 原为 '18'，现改为 '20'
+          node-version: '20'
 
-      # 构建前端静态文件（生成 web/dist）
       - name: Build frontend
         run: |
           cd web
-          npm ci          # 根据 package-lock.json 安装依赖，没有则用 npm install
-          npm run build   # 执行构建脚本，生成 dist 目录
+          npm ci
+          npm run build
           cd ..
 
-      - name: Install cross
+      # 创建自定义 Dockerfile（基于 Debian 10，GLIBC 2.28）
+      - name: Create Dockerfile.armhf.buster
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross
+          mkdir -p build/cross
+          cat > build/cross/Dockerfile.armhf.buster << 'EOF'
+          FROM debian:buster
 
-      - name: Cross compile
+          RUN apt-get update && apt-get install -y \
+              curl \
+              build-essential \
+              gcc-arm-linux-gnueabihf \
+              libc6-dev-armhf-cross \
+              pkg-config \
+              libudev-dev:armhf \
+              libdrm-dev:armhf \
+              libssl-dev:armhf \
+              && rm -rf /var/lib/apt/lists/*
+
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          ENV PATH="/root/.cargo/bin:${PATH}"
+
+          RUN rustup target add armv7-unknown-linux-gnueabihf
+          EOF
+
+      # 构建自定义 Docker 镜像
+      - name: Build custom Docker image
         run: |
-          cross build --release --target armv7-unknown-linux-gnueabihf
+          docker build \
+            -f build/cross/Dockerfile.armhf.buster \
+            -t one-kvm-cross:buster-armhf \
+            .
+
+      # 使用自定义镜像进行交叉编译
+      - name: Cross compile inside custom container
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/project \
+            -w /project \
+            one-kvm-cross:buster-armhf \
+            sh -c "
+              cargo build --release --target armv7-unknown-linux-gnueabihf
+            "
 
       - name: Get version from Cargo.toml
         id: get_version
@@ -59,9 +93,9 @@ jobs:
           Version: ${{ steps.get_version.outputs.version }}
           Architecture: armhf
           Maintainer: SilentWind <silentwind@example.com>
-          Description: A lightweight IP-KVM solution written in Rust
+          Description: A lightweight IP-KVM solution (built on Debian 10, glibc 2.28)
            One-KVM Open is a Rust-based, lightweight IP-KVM solution.
-           This package was built for Armbian 12 (armhf) using cross-rs.
+           This package is compatible with glibc >= 2.28.
           EOF
 
       - name: Build .deb package
@@ -71,7 +105,7 @@ jobs:
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: one-kvm-armhf-${{ steps.get_version.outputs.version }}
+          name: one-kvm-armhf-buster-${{ steps.get_version.outputs.version }}
           path: ./*.deb
 
   release:
