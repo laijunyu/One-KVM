@@ -1,72 +1,92 @@
-name: Build One-KVM for armhf (Using Cross)
+name: Build one-kvm armhf .deb (GLIBC 2.36)
 
+# 触发条件：推送 v 开头的标签时自动构建，也可以手动触发
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   build:
-    name: Cross compile for armhf
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. 构建前端静态文件
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # 让 x86 的 Runner 能够运行 ARM 容器
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
         with:
-          node-version: '20'
+          platforms: arm
 
-      - name: Build frontend
+      # 在 Debian 12 (GLIBC 2.36) armhf 环境中编译并打包
+      - name: Build inside armhf container and package .deb
         run: |
-          cd web
-          npm ci
-          npm run build
-          cd ..
+          docker run --rm --platform linux/arm/v7 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            arm32v7/debian:bookworm-slim \
+            bash -c "
+              # ---------- 安装编译依赖 ----------
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                git \
+                ca-certificates \
+                libdrm-dev \
+                libudev-dev \
+                pkg-config
 
-      # 2. 安装 cross 工具
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+              # ★★★ 以下构建命令请根据 one-kvm 实际技术栈调整 ★★★
+              # 假设项目使用 Makefile 或者可以直接编译：
+              make
+              # 如果最终产物名叫 one-kvm，则检查是否存在
+              if [ ! -f ./one-kvm ]; then
+                echo 'Build failed: one-kvm not found' && exit 1
+              fi
 
-      # 3. 交叉编译
-      - name: Cross Compile
-        run: cross build --release --target armv7-unknown-linux-gnueabihf
+              # ---------- 制作 .deb 包 ----------
+              PKG_NAME=one-kvm
+              PKG_VER=1.0.0   # 可改为从 git tag 自动获取
+              DEB_DIR=/tmp/deb
 
-      # 4. 获取版本号并打包 .deb
-      - name: Get version
-        id: get_version
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+              mkdir -p \$DEB_DIR/usr/local/bin
+              cp ./one-kvm \$DEB_DIR/usr/local/bin/
 
-      - name: Prepare .deb package
-        run: |
-          PKG_NAME="one-kvm_${{ steps.get_version.outputs.version }}_armhf"
-          mkdir -p $PKG_NAME/DEBIAN
-          mkdir -p $PKG_NAME/usr/local/bin
+              mkdir -p \$DEB_DIR/DEBIAN
+              cat << EOF > \$DEB_DIR/DEBIAN/control
+              Package: one-kvm
+              Version: \${PKG_VER}
+              Section: utils
+              Priority: optional
+              Architecture: armhf
+              Maintainer: your-name <your-email@example.com>
+              Description: One-KVM for armhf (GLIBC 2.36)
+               This package was built on Debian 12 armhf to ensure
+               full compatibility with GLIBC 2.36 systems.
+              EOF
 
-          cp target/armv7-unknown-linux-gnueabihf/release/one-kvm $PKG_NAME/usr/local/bin/
+              dpkg-deb --root-owner-group --build \$DEB_DIR /workspace/one-kvm_armhf.deb
+            "
 
-          cat << EOF > $PKG_NAME/DEBIAN/control
-          Package: one-kvm
-          Version: ${{ steps.get_version.outputs.version }}
-          Architecture: armhf
-          Maintainer: SilentWind <silentwind@example.com>
-          Description: A lightweight IP-KVM solution built for armhf.
-          EOF
-
-      - name: Build .deb package
-        run: sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_armhf
-
+      # 上传 .deb 作为构建工件（可在 Actions 页面下载）
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: one-kvm-armhf-${{ steps.get_version.outputs.version }}
-          path: ./*.deb
+          name: one-kvm-armhf-deb
+          path: one-kvm_armhf.deb
+
+      # 如果是由 tag 触发，自动创建 Release 并上传 .deb
+      - name: Create Release and Upload .deb
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: one-kvm_armhf.deb
+          name: "Release ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          body: |
+            armhf 架构的 one-kvm .deb 包，在 Debian 12 (GLIBC 2.36) 环境中编译。
+            适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 等系统的 ARM 设备。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
