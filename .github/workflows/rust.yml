@@ -1,0 +1,115 @@
+name: Build One-KVM Static Debian Package
+
+on:
+  push:
+    tags:
+      - 'v*'                     # 当推送版本标签时触发，如 v0.2.0
+  workflow_dispatch:             # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 构建矩阵：仅为 ARMv7 (armhf) 架构构建
+  build:
+    name: Build for armhf
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 🔄 已修改：target 改为 ARMv7 硬浮点目标
+          - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+            # 🔄 已修改：dockerfile 路径更新为 armhf 版本
+            dockerfile: build/cross/Dockerfile.armhf
+            deb_arch: armhf
+            cross_image: one-kvm-cross:armhf
+          # ➕ 新增：为 armv7-unknown-linux-gnueabi (软浮点) 架构构建
+          - target: armv7-unknown-linux-gnueabi
+            arch: armv7
+            dockerfile: build/cross/Dockerfile.armel
+            deb_arch: armel
+            cross_image: one-kvm-cross:armel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 🔄 已修改：构建自定义交叉编译 Docker 镜像（适用于 armhf）
+      - name: Build custom cross Docker image
+        run: |
+          docker build \
+            -f ${{ matrix.dockerfile }} \
+            -t ${{ matrix.cross_image }} \
+            .
+
+      - name: Build with cross (inside Docker)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/project \
+            -w /project \
+            ${{ matrix.cross_image }} \
+            sh -c "
+              rustup update stable && \
+              cargo install cross --git https://github.com/cross-rs/cross && \
+              cross build --release --target ${{ matrix.target }}
+            "
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      # 🔄 已修改：将 deb 包名称和内部路径中的架构更新
+      - name: Prepare .deb package structure
+        run: |
+          mkdir -p one-kvm_${{ steps.get_version.outputs.version }}_${{ matrix.deb_arch }}/DEBIAN
+          mkdir -p one-kvm_${{ steps.get_version.outputs.version }}_${{ matrix.deb_arch }}/usr/local/bin
+
+          cp target/${{ matrix.target }}/release/one-kvm \
+             one-kvm_${{ steps.get_version.outputs.version }}_${{ matrix.deb_arch }}/usr/local/bin/
+
+          cat << EOF > one-kvm_${{ steps.get_version.outputs.version }}_${{ matrix.deb_arch }}/DEBIAN/control
+          Package: one-kvm
+          Version: ${{ steps.get_version.outputs.version }}
+          Architecture: ${{ matrix.deb_arch }}
+          Maintainer: SilentWind <silentwind@example.com>
+          Description: A lightweight IP-KVM solution written in Rust
+           One-KVM Open is a Rust-based, lightweight IP-KVM (Keyboard, Video, Mouse over IP)
+           solution. It enables BIOS-level remote management of servers and workstations.
+           This package was built for Armbian 12 (armhf) and statically linked against GLIBC 2.31
+           to ensure broad compatibility.
+          EOF
+
+      - name: Build .deb package
+        run: |
+          sudo dpkg-deb --build one-kvm_${{ steps.get_version.outputs.version }}_${{ matrix.deb_arch }}
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-${{ matrix.deb_arch }}-${{ steps.get_version.outputs.version }}
+          path: ./*.deb
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.deb
+          generate_release_notes: true
