@@ -50,14 +50,12 @@ jobs:
                 linux-libc-dev \
                 xz-utils
 
-              # ---------- 安装 Node.js 22 LTS（手动下载 armv7l 预编译包）----------
+              # ---------- 安装 Node.js 22 LTS ----------
               NODE_VERSION=22.14.0
               curl -fsSL https://nodejs.org/dist/v\${NODE_VERSION}/node-v\${NODE_VERSION}-linux-armv7l.tar.xz \
                 -o /tmp/node.tar.xz
               tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
               rm /tmp/node.tar.xz
-              node -v
-              npm -v
 
               # ---------- 编译前端 Vue 项目 ----------
               cd /workspace/web
@@ -82,13 +80,28 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/libjpeg-turbo
 
-              # 2. libyuv
+              # 2. libyuv（手动创建 pkg-config 文件）
               git clone --depth 1 https://github.com/lemenkov/libyuv /tmp/libyuv
               cd /tmp/libyuv && mkdir build && cd build
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=OFF
               make -j\$(nproc) && make install
               rm -rf /tmp/libyuv
+
+              # 创建 libyuv.pc，使 pkg-config 能找到它
+              mkdir -p /usr/local/lib/pkgconfig
+              cat > /usr/local/lib/pkgconfig/libyuv.pc << 'EOF'
+              prefix=/usr/local
+              exec_prefix=${prefix}
+              libdir=${exec_prefix}/lib
+              includedir=${prefix}/include
+
+              Name: libyuv
+              Description: YUV scaling and conversion library
+              Version: 1.0.0
+              Libs: -L${libdir} -lyuv
+              Cflags: -I${includedir}
+              EOF
 
               # 3. libvpx
               git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
@@ -114,6 +127,8 @@ jobs:
               rm -rf /tmp/x265
 
               # ---------- 设置编译环境 ----------
+              # 确保 pkg-config 能搜索到手工安装的库
+              export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:\$PKG_CONFIG_PATH"
               export PKG_CONFIG_ALLOW_CROSS=1
               export PKG_CONFIG_ALL_STATIC=1
               export FFMPEG_STATIC=1
