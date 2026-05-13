@@ -50,13 +50,13 @@ jobs:
                 linux-libc-dev \
                 xz-utils
 
-              # ---------- 安装 Node.js 22 LTS (手动下载 armhf 二进制包) ----------
-              NODE_VERSION=22.14.0   # 稳定版，可自行更换
+              # ---------- 安装 Node.js 22 LTS（手动下载 armv7l 预编译包）----------
+              NODE_VERSION=22.14.0
               curl -fsSL https://nodejs.org/dist/v\${NODE_VERSION}/node-v\${NODE_VERSION}-linux-armv7l.tar.xz \
                 -o /tmp/node.tar.xz
               tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
               rm /tmp/node.tar.xz
-              node -v   # 应显示 v22.14.0
+              node -v
               npm -v
 
               # ---------- 编译前端 Vue 项目 ----------
@@ -67,17 +67,163 @@ jobs:
                 echo 'Frontend build failed: dist not found' && exit 1
               fi
 
-              # ---------- 以下与之前完全相同：Rust、静态库、Cargo、打包 ----------
+              # ---------- 安装 Rust 工具链 ----------
               cd /workspace
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
               source \$HOME/.cargo/env
               rustup target add armv7-unknown-linux-gnueabihf
 
-              # 静态依赖库构建（libjpeg-turbo, libyuv, libvpx, libx264, libx265）...
-              # （此处保持原样，不重复列出）
+              # ---------- 构建静态依赖库 ----------
+              # 1. libjpeg-turbo
+              git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/libjpeg-turbo
+              cd /tmp/libjpeg-turbo && mkdir build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_SHARED=OFF -DENABLE_STATIC=ON
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libjpeg-turbo
 
-              # 编译、制作 .deb...
-              # （此处保持原样，不重复列出）
+              # 2. libyuv
+              git clone --depth 1 https://github.com/lemenkov/libyuv /tmp/libyuv
+              cd /tmp/libyuv && mkdir build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=OFF
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libyuv
+
+              # 3. libvpx
+              git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
+              cd /tmp/libvpx
+              ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic \
+                --disable-examples --disable-tools --disable-docs --disable-unit-tests
+              make -j\$(nproc) && make install
+              rm -rf /tmp/libvpx
+
+              # 4. libx264
+              git clone --depth 1 https://code.videolan.org/videolan/x264.git /tmp/x264
+              cd /tmp/x264
+              ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic --disable-cli
+              make -j\$(nproc) && make install
+              rm -rf /tmp/x264
+
+              # 5. libx265
+              git clone --depth 1 https://bitbucket.org/multicoreware/x265_git /tmp/x265
+              cd /tmp/x265/source && mkdir -p build && cd build
+              cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              make -j\$(nproc) && make install
+              rm -rf /tmp/x265
+
+              # ---------- 设置编译环境 ----------
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_ALL_STATIC=1
+              export FFMPEG_STATIC=1
+              export LIBYUV_STATIC=1
+              export OPUS_STATIC=1
+              export RUSTFLAGS='-C target-feature=+crt-static'
+
+              # ---------- 编译 One-KVM ----------
+              cd /workspace
+              cargo build --release --target armv7-unknown-linux-gnueabihf
+
+              # ---------- 制作 .deb 包 ----------
+              PKG_VER=\$(grep -m1 '^version =' Cargo.toml | cut -d'\"' -f2)
+              echo \"Detected version: \$PKG_VER\"
+
+              BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
+              if [ ! -f \"\$BINARY_PATH\" ]; then
+                echo 'Build failed: one-kvm not found' && exit 1
+              fi
+
+              PKG_DIR=/tmp/one-kvm-pkg
+              mkdir -p \$PKG_DIR/DEBIAN
+              mkdir -p \$PKG_DIR/usr/bin
+              mkdir -p \$PKG_DIR/etc/one-kvm/ventoy
+              mkdir -p \$PKG_DIR/lib/systemd/system
+
+              cp \$BINARY_PATH \$PKG_DIR/usr/bin/one-kvm
+              chmod 755 \$PKG_DIR/usr/bin/one-kvm
+
+              if [ -d /workspace/libs/ventoy-img-rs/resources ]; then
+                cp -r /workspace/libs/ventoy-img-rs/resources/* \$PKG_DIR/etc/one-kvm/ventoy/
+              fi
+
+              if [ -f /workspace/build/one-kvm.service ]; then
+                cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/
+              fi
+
+              cat > \$PKG_DIR/DEBIAN/postinst <<'POSTINST_EOF'
+              #!/bin/bash
+              set -e
+              case \"\$1\" in
+                configure)
+                  if [ -f /lib/systemd/system/one-kvm.service ]; then
+                    systemctl enable one-kvm || true
+                    systemctl start one-kvm || true
+                  fi
+                  ;;
+              esac
+              exit 0
+              POSTINST_EOF
+              chmod 755 \$PKG_DIR/DEBIAN/postinst
+
+              cat > \$PKG_DIR/DEBIAN/prerm <<'PRERM_EOF'
+              #!/bin/bash
+              set -e
+              case \"\$1\" in
+                remove|deconfigure)
+                  if [ -f /lib/systemd/system/one-kvm.service ]; then
+                    systemctl stop one-kvm || true
+                    systemctl disable one-kvm || true
+                  fi
+                  ;;
+              esac
+              exit 0
+              PRERM_EOF
+              chmod 755 \$PKG_DIR/DEBIAN/prerm
+
+              cat << EOF > \$PKG_DIR/DEBIAN/control
+              Package: one-kvm
+              Version: \${PKG_VER}
+              Section: admin
+              Priority: optional
+              Architecture: armhf
+              Maintainer: SilentWind
+              Depends: ca-certificates
+              Description: A open and lightweight IP-KVM solution written in Rust
+               Enables BIOS-level remote management of servers and workstations.
+               .
+               One-KVM provides video capture, HID emulation (keyboard/mouse),
+               mass storage device forwarding, and ATX power control for remote
+               server management over IP.
+               .
+               Features:
+                * Hardware-accelerated video encoding (VAAPI, QSV, RKMPP)
+                * WebRTC and MJPEG streaming with low latency
+                * USB HID emulation via OTG gadget
+                * Mass storage device for ISO/IMG mounting
+                * ATX power control via GPIO or USB relay
+              Homepage: https://github.com/mofeng-git/One-KVM
+              EOF
+
+              dpkg-deb --root-owner-group --build \$PKG_DIR /workspace/one-kvm_armhf.deb
             "
 
-      # 后续步骤不变...
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-armhf-deb
+          path: one-kvm_armhf.deb
+
+      - name: Create Release and Upload .deb
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: one-kvm_armhf.deb
+          name: "Release ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          body: |
+            专为 armhf 架构构建的 One-KVM .deb 包，于 Debian 12 (GLIBC 2.36) 环境中编译。
+            此版本已包含前端页面，并将依赖库静态链接，彻底解决 GLIBC 版本不匹配问题。
+            适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 的 ARM 设备。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
