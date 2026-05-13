@@ -88,20 +88,18 @@ jobs:
               make -j\$(nproc) && make install
               rm -rf /tmp/libyuv
 
-              # 创建 libyuv.pc，使 pkg-config 能找到它
+              # 创建 libyuv.pc
               mkdir -p /usr/local/lib/pkgconfig
-              cat > /usr/local/lib/pkgconfig/libyuv.pc << 'EOF'
-              prefix=/usr/local
-              exec_prefix=${prefix}
-              libdir=${exec_prefix}/lib
-              includedir=${prefix}/include
-
-              Name: libyuv
-              Description: YUV scaling and conversion library
-              Version: 1.0.0
-              Libs: -L${libdir} -lyuv
-              Cflags: -I${includedir}
-              EOF
+              echo 'prefix=/usr/local' > /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'exec_prefix=\${prefix}' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'libdir=\${exec_prefix}/lib' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'includedir=\${prefix}/include' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo '' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Name: libyuv' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Description: YUV scaling and conversion library' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Version: 1.0.0' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Libs: -L\${libdir} -lyuv' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Cflags: -I\${includedir}' >> /usr/local/lib/pkgconfig/libyuv.pc
 
               # 3. libvpx
               git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
@@ -127,8 +125,7 @@ jobs:
               rm -rf /tmp/x265
 
               # ---------- 设置编译环境 ----------
-              # 确保 pkg-config 能搜索到手工安装的库
-              export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:\$PKG_CONFIG_PATH"
+              export PKG_CONFIG_PATH=\"/usr/local/lib/pkgconfig:\$PKG_CONFIG_PATH\"
               export PKG_CONFIG_ALLOW_CROSS=1
               export PKG_CONFIG_ALL_STATIC=1
               export FFMPEG_STATIC=1
@@ -140,16 +137,21 @@ jobs:
               cd /workspace
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
+              # 检查二进制
+              BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
+              if [ ! -f \"\$BINARY_PATH\" ]; then
+                echo '=== BUILD FAILED ==='
+                find target -maxdepth 3 -type d 2>/dev/null || true
+                exit 1
+              fi
+              echo \"Binary found: \$(ls -lh \$BINARY_PATH)\"
+
               # ---------- 制作 .deb 包 ----------
               PKG_VER=\$(grep -m1 '^version =' Cargo.toml | cut -d'\"' -f2)
               echo \"Detected version: \$PKG_VER\"
 
-              BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
-              if [ ! -f \"\$BINARY_PATH\" ]; then
-                echo 'Build failed: one-kvm not found' && exit 1
-              fi
-
               PKG_DIR=/tmp/one-kvm-pkg
+              rm -rf \$PKG_DIR
               mkdir -p \$PKG_DIR/DEBIAN
               mkdir -p \$PKG_DIR/usr/bin
               mkdir -p \$PKG_DIR/etc/one-kvm/ventoy
@@ -159,68 +161,74 @@ jobs:
               chmod 755 \$PKG_DIR/usr/bin/one-kvm
 
               if [ -d /workspace/libs/ventoy-img-rs/resources ]; then
-                cp -r /workspace/libs/ventoy-img-rs/resources/* \$PKG_DIR/etc/one-kvm/ventoy/
+                cp -r /workspace/libs/ventoy-img-rs/resources/* \$PKG_DIR/etc/one-kvm/ventoy/ || true
               fi
-
               if [ -f /workspace/build/one-kvm.service ]; then
-                cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/
+                cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/ || true
               fi
 
-              cat > \$PKG_DIR/DEBIAN/postinst <<'POSTINST_EOF'
-              #!/bin/bash
-              set -e
-              case \"\$1\" in
-                configure)
-                  if [ -f /lib/systemd/system/one-kvm.service ]; then
-                    systemctl enable one-kvm || true
-                    systemctl start one-kvm || true
-                  fi
-                  ;;
-              esac
-              exit 0
-              POSTINST_EOF
+              # 生成 postinst
+              echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/postinst
+              echo 'set -e' >> \$PKG_DIR/DEBIAN/postinst
+              echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/postinst
+              echo '  configure)' >> \$PKG_DIR/DEBIAN/postinst
+              echo '    if [ -f /lib/systemd/system/one-kvm.service ]; then' >> \$PKG_DIR/DEBIAN/postinst
+              echo '      systemctl enable one-kvm || true' >> \$PKG_DIR/DEBIAN/postinst
+              echo '      systemctl start one-kvm || true' >> \$PKG_DIR/DEBIAN/postinst
+              echo '    fi' >> \$PKG_DIR/DEBIAN/postinst
+              echo '    ;;' >> \$PKG_DIR/DEBIAN/postinst
+              echo 'esac' >> \$PKG_DIR/DEBIAN/postinst
+              echo 'exit 0' >> \$PKG_DIR/DEBIAN/postinst
               chmod 755 \$PKG_DIR/DEBIAN/postinst
 
-              cat > \$PKG_DIR/DEBIAN/prerm <<'PRERM_EOF'
-              #!/bin/bash
-              set -e
-              case \"\$1\" in
-                remove|deconfigure)
-                  if [ -f /lib/systemd/system/one-kvm.service ]; then
-                    systemctl stop one-kvm || true
-                    systemctl disable one-kvm || true
-                  fi
-                  ;;
-              esac
-              exit 0
-              PRERM_EOF
+              # 生成 prerm
+              echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/prerm
+              echo 'set -e' >> \$PKG_DIR/DEBIAN/prerm
+              echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/prerm
+              echo '  remove|deconfigure)' >> \$PKG_DIR/DEBIAN/prerm
+              echo '    if [ -f /lib/systemd/system/one-kvm.service ]; then' >> \$PKG_DIR/DEBIAN/prerm
+              echo '      systemctl stop one-kvm || true' >> \$PKG_DIR/DEBIAN/prerm
+              echo '      systemctl disable one-kvm || true' >> \$PKG_DIR/DEBIAN/prerm
+              echo '    fi' >> \$PKG_DIR/DEBIAN/prerm
+              echo '    ;;' >> \$PKG_DIR/DEBIAN/prerm
+              echo 'esac' >> \$PKG_DIR/DEBIAN/prerm
+              echo 'exit 0' >> \$PKG_DIR/DEBIAN/prerm
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
-              cat << EOF > \$PKG_DIR/DEBIAN/control
-              Package: one-kvm
-              Version: \${PKG_VER}
-              Section: admin
-              Priority: optional
-              Architecture: armhf
-              Maintainer: SilentWind
-              Depends: ca-certificates
-              Description: A open and lightweight IP-KVM solution written in Rust
-               Enables BIOS-level remote management of servers and workstations.
-               .
-               One-KVM provides video capture, HID emulation (keyboard/mouse),
-               mass storage device forwarding, and ATX power control for remote
-               server management over IP.
-               .
-               Features:
-                * Hardware-accelerated video encoding (VAAPI, QSV, RKMPP)
-                * WebRTC and MJPEG streaming with low latency
-                * USB HID emulation via OTG gadget
-                * Mass storage device for ISO/IMG mounting
-                * ATX power control via GPIO or USB relay
-              Homepage: https://github.com/mofeng-git/One-KVM
-              EOF
+              # 生成 control
+              echo 'Package: one-kvm' > \$PKG_DIR/DEBIAN/control
+              echo \"Version: \${PKG_VER}\" >> \$PKG_DIR/DEBIAN/control
+              echo 'Section: admin' >> \$PKG_DIR/DEBIAN/control
+              echo 'Priority: optional' >> \$PKG_DIR/DEBIAN/control
+              echo 'Architecture: armhf' >> \$PKG_DIR/DEBIAN/control
+              echo 'Maintainer: SilentWind' >> \$PKG_DIR/DEBIAN/control
+              echo 'Depends: ca-certificates' >> \$PKG_DIR/DEBIAN/control
+              echo 'Description: A open and lightweight IP-KVM solution written in Rust' >> \$PKG_DIR/DEBIAN/control
+              echo ' Enables BIOS-level remote management of servers and workstations.' >> \$PKG_DIR/DEBIAN/control
+              echo ' .' >> \$PKG_DIR/DEBIAN/control
+              echo ' One-KVM provides video capture, HID emulation (keyboard/mouse),' >> \$PKG_DIR/DEBIAN/control
+              echo ' mass storage device forwarding, and ATX power control for remote' >> \$PKG_DIR/DEBIAN/control
+              echo ' server management over IP.' >> \$PKG_DIR/DEBIAN/control
+              echo ' .' >> \$PKG_DIR/DEBIAN/control
+              echo ' Features:' >> \$PKG_DIR/DEBIAN/control
+              echo '  * Hardware-accelerated video encoding (VAAPI, QSV, RKMPP)' >> \$PKG_DIR/DEBIAN/control
+              echo '  * WebRTC and MJPEG streaming with low latency' >> \$PKG_DIR/DEBIAN/control
+              echo '  * USB HID emulation via OTG gadget' >> \$PKG_DIR/DEBIAN/control
+              echo '  * Mass storage device for ISO/IMG mounting' >> \$PKG_DIR/DEBIAN/control
+              echo '  * ATX power control via GPIO or USB relay' >> \$PKG_DIR/DEBIAN/control
+              echo 'Homepage: https://github.com/mofeng-git/One-KVM' >> \$PKG_DIR/DEBIAN/control
 
               dpkg-deb --root-owner-group --build \$PKG_DIR /workspace/one-kvm_armhf.deb
+
+              # 验证 .deb 文件
+              if [ -f /workspace/one-kvm_armhf.deb ]; then
+                echo '.deb generated successfully'
+                ls -lh /workspace/one-kvm_armhf.deb
+              else
+                echo 'ERROR: .deb not created'
+                ls -la /workspace/
+                exit 1
+              fi
             "
 
       - name: Upload .deb artifact
