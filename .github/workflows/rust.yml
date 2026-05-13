@@ -48,14 +48,18 @@ jobs:
                 libdrm-dev \
                 zlib1g-dev \
                 linux-libc-dev \
-                nodejs \
-                npm
+                gnupg
+
+              # ---------- 安装 Node.js 22 LTS（armhf）----------
+              curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+              apt-get install -y nodejs
+              node -v   # 应显示 v22.x
+              npm -v
 
               # ---------- 编译前端 Vue 项目 ----------
               cd /workspace/web
               npm install
               npm run build
-              # 确保生成 dist 目录
               if [ ! -d dist ]; then
                 echo 'Frontend build failed: dist not found' && exit 1
               fi
