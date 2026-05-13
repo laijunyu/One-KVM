@@ -78,14 +78,16 @@ jobs:
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_SHARED=OFF -DENABLE_STATIC=ON
               make -j\$(nproc) && make install
+              cd /
               rm -rf /tmp/libjpeg-turbo
 
-              # 2. libyuv（手动创建 pkg-config 文件）
+              # 2. libyuv
               git clone --depth 1 https://github.com/lemenkov/libyuv /tmp/libyuv
               cd /tmp/libyuv && mkdir build && cd build
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=OFF
               make -j\$(nproc) && make install
+              cd /
               rm -rf /tmp/libyuv
 
               # 创建 libyuv.pc
@@ -107,6 +109,7 @@ jobs:
               ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic \
                 --disable-examples --disable-tools --disable-docs --disable-unit-tests
               make -j\$(nproc) && make install
+              cd /
               rm -rf /tmp/libvpx
 
               # 4. libx264
@@ -114,6 +117,7 @@ jobs:
               cd /tmp/x264
               ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic --disable-cli
               make -j\$(nproc) && make install
+              cd /
               rm -rf /tmp/x264
 
               # 5. libx265
@@ -122,6 +126,7 @@ jobs:
               cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
                 -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
               make -j\$(nproc) && make install
+              cd /
               rm -rf /tmp/x265
 
               # ---------- 设置编译环境 ----------
@@ -137,7 +142,6 @@ jobs:
               cd /workspace
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
-              # 检查二进制
               BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
               if [ ! -f \"\$BINARY_PATH\" ]; then
                 echo '=== BUILD FAILED ==='
@@ -167,7 +171,6 @@ jobs:
                 cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/ || true
               fi
 
-              # 生成 postinst
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/postinst
               echo 'set -e' >> \$PKG_DIR/DEBIAN/postinst
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/postinst
@@ -181,7 +184,6 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/postinst
               chmod 755 \$PKG_DIR/DEBIAN/postinst
 
-              # 生成 prerm
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/prerm
               echo 'set -e' >> \$PKG_DIR/DEBIAN/prerm
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/prerm
@@ -195,7 +197,6 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/prerm
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
-              # 生成 control
               echo 'Package: one-kvm' > \$PKG_DIR/DEBIAN/control
               echo \"Version: \${PKG_VER}\" >> \$PKG_DIR/DEBIAN/control
               echo 'Section: admin' >> \$PKG_DIR/DEBIAN/control
@@ -220,7 +221,6 @@ jobs:
 
               dpkg-deb --root-owner-group --build \$PKG_DIR /workspace/one-kvm_armhf.deb
 
-              # 验证 .deb 文件
               if [ -f /workspace/one-kvm_armhf.deb ]; then
                 echo '.deb generated successfully'
                 ls -lh /workspace/one-kvm_armhf.deb
