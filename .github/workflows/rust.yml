@@ -25,7 +25,8 @@ jobs:
             -w /workspace \
             arm32v7/debian:bookworm-slim \
             bash -c "
-               apt-get update
+              # ---------- 安装系统依赖 ----------
+              apt-get update
               apt-get install -y --no-install-recommends \
                 build-essential \
                 curl \
@@ -145,6 +146,8 @@ jobs:
 
               # ---------- 编译 One-KVM ----------
               cd /workspace
+              # 禁用 rkmpp feature（系统 FFmpeg 不支持 Rockchip MPP）
+              sed -i '/rkmpp/d' Cargo.toml
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
               BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
