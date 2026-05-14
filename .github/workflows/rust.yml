@@ -148,8 +148,9 @@ jobs:
               # ---------- 编译 One-KVM ----------
               cd /workspace
               sed -i '/rkmpp/d' Cargo.toml
-              find /workspace/libs/hwcodec -name \"*.cpp\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/0/g' {} \\;
-              find /workspace/libs/hwcodec -name \"*.h\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/0/g' {} \\;
+              # 将 RKMPP 替换为 AV_HWDEVICE_TYPE_NONE，避免类型错误
+              find /workspace/libs/hwcodec -name \"*.cpp\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
+              find /workspace/libs/hwcodec -name \"*.h\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
               BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
@@ -181,7 +182,6 @@ jobs:
                 cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/ || true
               fi
 
-              # 生成 postinst
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/postinst
               echo 'set -e' >> \$PKG_DIR/DEBIAN/postinst
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/postinst
@@ -195,7 +195,6 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/postinst
               chmod 755 \$PKG_DIR/DEBIAN/postinst
 
-              # 生成 prerm
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/prerm
               echo 'set -e' >> \$PKG_DIR/DEBIAN/prerm
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/prerm
@@ -209,7 +208,6 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/prerm
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
-              # 生成 control
               echo 'Package: one-kvm' > \$PKG_DIR/DEBIAN/control
               echo \"Version: \${PKG_VER}\" >> \$PKG_DIR/DEBIAN/control
               echo 'Section: admin' >> \$PKG_DIR/DEBIAN/control
@@ -225,7 +223,7 @@ jobs:
               echo ' server management over IP.' >> \$PKG_DIR/DEBIAN/control
               echo ' .' >> \$PKG_DIR/DEBIAN/control
               echo ' Features:' >> \$PKG_DIR/DEBIAN/control
-              echo '  * Hardware-accelerated video encoding (VAAPI, QSV)' >> \$PKG_DIR/DEBIAN/control
+              echo '  * Hardware-accelerated video encoding (VAAPI)' >> \$PKG_DIR/DEBIAN/control
               echo '  * WebRTC and MJPEG streaming with low latency' >> \$PKG_DIR/DEBIAN/control
               echo '  * USB HID emulation via OTG gadget' >> \$PKG_DIR/DEBIAN/control
               echo '  * Mass storage device for ISO/IMG mounting' >> \$PKG_DIR/DEBIAN/control
