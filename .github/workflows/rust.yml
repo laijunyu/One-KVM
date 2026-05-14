@@ -54,7 +54,9 @@ jobs:
                 libavutil-dev \
                 libswscale-dev \
                 libavfilter-dev \
-                libavdevice-dev
+                libavdevice-dev \
+                libva-dev \
+                libopus-dev
 
               # ---------- 安装 Node.js 22 LTS ----------
               NODE_VERSION=22.14.0
@@ -138,16 +140,16 @@ jobs:
               # ---------- 设置编译环境 ----------
               export PKG_CONFIG_PATH=\"/usr/local/lib/pkgconfig:\$PKG_CONFIG_PATH\"
               export PKG_CONFIG_ALLOW_CROSS=1
-              export PKG_CONFIG_ALL_STATIC=1
-              export FFMPEG_STATIC=1
+              export FFMPEG_STATIC=0
               export LIBYUV_STATIC=1
-              export OPUS_STATIC=1
-              export RUSTFLAGS='-C target-feature=+crt-static'
+              export OPUS_STATIC=0
+              export CARGO_BUILD_JOBS=2
 
               # ---------- 编译 One-KVM ----------
               cd /workspace
-              # 禁用 rkmpp feature（系统 FFmpeg 不支持 Rockchip MPP）
               sed -i '/rkmpp/d' Cargo.toml
+              find /workspace/libs/hwcodec -name \"*.cpp\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/0/g' {} \\;
+              find /workspace/libs/hwcodec -name \"*.h\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/0/g' {} \\;
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
               BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
@@ -179,6 +181,7 @@ jobs:
                 cp /workspace/build/one-kvm.service \$PKG_DIR/lib/systemd/system/ || true
               fi
 
+              # 生成 postinst
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/postinst
               echo 'set -e' >> \$PKG_DIR/DEBIAN/postinst
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/postinst
@@ -192,6 +195,7 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/postinst
               chmod 755 \$PKG_DIR/DEBIAN/postinst
 
+              # 生成 prerm
               echo '#!/bin/bash' > \$PKG_DIR/DEBIAN/prerm
               echo 'set -e' >> \$PKG_DIR/DEBIAN/prerm
               echo 'case \"\$1\" in' >> \$PKG_DIR/DEBIAN/prerm
@@ -205,13 +209,14 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/prerm
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
+              # 生成 control
               echo 'Package: one-kvm' > \$PKG_DIR/DEBIAN/control
               echo \"Version: \${PKG_VER}\" >> \$PKG_DIR/DEBIAN/control
               echo 'Section: admin' >> \$PKG_DIR/DEBIAN/control
               echo 'Priority: optional' >> \$PKG_DIR/DEBIAN/control
               echo 'Architecture: armhf' >> \$PKG_DIR/DEBIAN/control
               echo 'Maintainer: SilentWind' >> \$PKG_DIR/DEBIAN/control
-              echo 'Depends: ca-certificates' >> \$PKG_DIR/DEBIAN/control
+              echo 'Depends: libavcodec58, libavformat58, libavutil56, libswscale5, libavfilter7, libavdevice58, libopus0, libva2, ca-certificates' >> \$PKG_DIR/DEBIAN/control
               echo 'Description: A open and lightweight IP-KVM solution written in Rust' >> \$PKG_DIR/DEBIAN/control
               echo ' Enables BIOS-level remote management of servers and workstations.' >> \$PKG_DIR/DEBIAN/control
               echo ' .' >> \$PKG_DIR/DEBIAN/control
@@ -220,7 +225,7 @@ jobs:
               echo ' server management over IP.' >> \$PKG_DIR/DEBIAN/control
               echo ' .' >> \$PKG_DIR/DEBIAN/control
               echo ' Features:' >> \$PKG_DIR/DEBIAN/control
-              echo '  * Hardware-accelerated video encoding (VAAPI, QSV, RKMPP)' >> \$PKG_DIR/DEBIAN/control
+              echo '  * Hardware-accelerated video encoding (VAAPI, QSV)' >> \$PKG_DIR/DEBIAN/control
               echo '  * WebRTC and MJPEG streaming with low latency' >> \$PKG_DIR/DEBIAN/control
               echo '  * USB HID emulation via OTG gadget' >> \$PKG_DIR/DEBIAN/control
               echo '  * Mass storage device for ISO/IMG mounting' >> \$PKG_DIR/DEBIAN/control
@@ -254,7 +259,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body: |
             专为 armhf 架构构建的 One-KVM .deb 包，于 Debian 12 (GLIBC 2.36) 环境中编译。
-            此版本已包含前端页面，并将依赖库静态链接，彻底解决 GLIBC 版本不匹配问题。
+            此版本已包含前端页面，并解决了 GLIBC 版本不匹配问题。
             适用于运行 Debian 12 / Raspberry Pi OS (bookworm) 的 ARM 设备。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
