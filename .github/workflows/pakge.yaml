@@ -1,4 +1,4 @@
-name: Package one-kvm from Release (self-contained, fixed)
+name: Package one-kvm from Release (self-contained)
 
 on:
   workflow_dispatch:
@@ -39,15 +39,17 @@ jobs:
         with:
           platforms: arm
 
-      - name: Package into self-contained .deb (armhf container)
+      - name: Package self-contained .deb (armhf container)
         run: |
+          mkdir -p output
+
           docker run --rm --platform linux/arm/v7 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             arm32v7/debian:bookworm-slim \
             bash -c "
               set -e
-              echo '--- 安装依赖 ---'
+              echo '=== 1. 安装依赖 ==='
               apt-get update
               apt-get install -y --no-install-recommends \
                 patchelf \
@@ -68,11 +70,11 @@ jobs:
               mkdir -p \$DEB_ROOT/usr/lib/one-kvm
               mkdir -p \$DEB_ROOT/lib/systemd/system
 
-              echo '--- 复制二进制 ---'
+              echo '=== 2. 复制二进制 ==='
               cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
               chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-              echo '--- 收集依赖库 ---'
+              echo '=== 3. 收集依赖库 ==='
               ldd \$DEB_ROOT/usr/bin/one-kvm \
                 | grep '=> /' \
                 | awk '{print \$3}' \
@@ -83,10 +85,10 @@ jobs:
                     fi
                   done
 
-              echo '--- 修改 RPATH ---'
+              echo '=== 4. 修改 RPATH ==='
               patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
-              echo '--- 生成 DEBIAN 控制文件 ---'
+              echo '=== 5. 生成 DEBIAN 控制文件 ==='
               cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
               #!/bin/bash
               set -e
@@ -128,16 +130,25 @@ jobs:
               Homepage: https://github.com/mofeng-git/One-KVM
               CONTROL_EOF
 
-              echo '--- 打包 .deb ---'
-              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_armhf_selfcontained.deb
+              echo '=== 6. 打包 .deb ==='
+              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/output/one-kvm_armhf_selfcontained.deb
 
-              echo '--- 检查产物 ---'
-              ls -la /workspace/one-kvm_armhf_selfcontained.deb
+              echo '=== 7. 验证产物 ==='
+              ls -la /workspace/output/
+              if [ ! -f /workspace/output/one-kvm_armhf_selfcontained.deb ]; then
+                echo '❌ 打包失败：产物不存在！'
+                exit 1
+              fi
               echo '✅ 打包完成'
             "
+
+      - name: List output directory
+        run: |
+          echo "输出目录内容："
+          ls -la output/
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-selfcontained-deb
-          path: one-kvm_armhf_selfcontained.deb
+          path: output/one-kvm_armhf_selfcontained.deb
