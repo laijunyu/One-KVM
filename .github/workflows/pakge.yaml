@@ -23,34 +23,37 @@ jobs:
           # 解压 zip → 得到 .deb
           unzip -o release-assets/one-kvm*.zip -d release-assets/deb-pkg
 
-          # 从 .deb 中提取 one-kvm 二进制到 workspace/binary 目录
+          # 从 .deb 中提取 one-kvm 二进制到 binary 目录
           DEB_FILE=$(find release-assets/deb-pkg -name "*.deb" | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 .deb 文件！"
+            ls -laR release-assets/deb-pkg
+            exit 1
+          fi
           mkdir -p binary
           dpkg-deb -x "$DEB_FILE" binary/
-
-          # 提取版本号
-          PKG_VER=$(echo "$DEB_FILE" | grep -oP '\d+\.\d+\.\d+' || echo "1.0")
-          echo "PKG_VER=$PKG_VER" >> $GITHUB_ENV
+          echo "✅ 提取完成"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
 
-      - name: Package into self-contained .deb (inside armhf container)
+      - name: Package into self-contained .deb (armhf container)
         run: |
           docker run --rm --platform linux/arm/v7 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             arm32v7/debian:bookworm-slim \
             bash -c "
+              set -e
+              echo '--- 安装依赖 ---'
               apt-get update
               apt-get install -y --no-install-recommends \
                 patchelf \
                 libyuv0 \
                 dpkg-dev
 
-              # 找到宿主机提取出来的 one-kvm 二进制
               BINARY=/workspace/binary/usr/bin/one-kvm
               if [ ! -f \"\$BINARY\" ]; then
                 echo '❌ 未找到 one-kvm 可执行文件！'
@@ -58,7 +61,6 @@ jobs:
                 exit 1
               fi
 
-              PKG_VER='${{ env.PKG_VER }}'
               DEB_ROOT=/tmp/one-kvm-deb
               rm -rf \$DEB_ROOT
               mkdir -p \$DEB_ROOT/DEBIAN
@@ -66,23 +68,25 @@ jobs:
               mkdir -p \$DEB_ROOT/usr/lib/one-kvm
               mkdir -p \$DEB_ROOT/lib/systemd/system
 
+              echo '--- 复制二进制 ---'
               cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
               chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-              # 收集所有动态库依赖（容器内已安装 libyuv0，所以会被列出）
-              echo '正在收集依赖库...'
+              echo '--- 收集依赖库 ---'
               ldd \$DEB_ROOT/usr/bin/one-kvm \
                 | grep '=> /' \
                 | awk '{print \$3}' \
                 | sort -u \
                 | while read lib; do
-                    cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
+                    if [ -f \"\$lib\" ]; then
+                      cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
+                    fi
                   done
 
-              # 修改 RPATH
+              echo '--- 修改 RPATH ---'
               patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
-              # 生成 DEBIAN 控制文件
+              echo '--- 生成 DEBIAN 控制文件 ---'
               cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
               #!/bin/bash
               set -e
@@ -112,7 +116,7 @@ jobs:
 
               cat > \$DEB_ROOT/DEBIAN/control << CONTROL_EOF
               Package: one-kvm
-              Version: \${PKG_VER}
+              Version: 1.0
               Section: admin
               Priority: optional
               Architecture: armhf
@@ -124,8 +128,11 @@ jobs:
               Homepage: https://github.com/mofeng-git/One-KVM
               CONTROL_EOF
 
-              # 打包到 workspace 目录
-              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_\${PKG_VER}_armhf.deb
+              echo '--- 打包 .deb ---'
+              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_armhf_selfcontained.deb
+
+              echo '--- 检查产物 ---'
+              ls -la /workspace/one-kvm_armhf_selfcontained.deb
               echo '✅ 打包完成'
             "
 
@@ -133,4 +140,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-selfcontained-deb
-          path: one-kvm_*_armhf.deb
+          path: one-kvm_armhf_selfcontained.deb
