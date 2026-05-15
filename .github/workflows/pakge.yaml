@@ -1,4 +1,4 @@
-name: Package one-kvm from Release (self-contained)
+name: Package one-kvm from Release (self-contained + libyuv)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y patchelf dpkg-dev binutils qemu-user-static
+          sudo apt-get install -y patchelf dpkg-dev binutils qemu-user-static curl
 
       - name: Download latest release asset
         env:
@@ -31,7 +31,7 @@ jobs:
           mkdir -p release-assets/extracted
           dpkg-deb -x "$DEB_FILE" release-assets/extracted
 
-      - name: Find one-kvm binary
+      - name: Find one-kvm binary and extract version
         run: |
           BINARY=$(find release-assets/extracted -type f -name "one-kvm" | head -1)
           if [ -z "$BINARY" ]; then
@@ -42,37 +42,40 @@ jobs:
           chmod +x "$BINARY"
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
-      - name: Extract version
-        run: |
-          # 从 deb 文件名提取版本号
           PKG_VER=$(echo "$DEB_FILE" | grep -oP '\d+\.\d+\.\d+' || echo "1.0")
           echo "PKG_VER=$PKG_VER" >> $GITHUB_ENV
 
-      - name: Collect dependencies and package
+      - name: Collect dependencies and package (include libyuv)
         run: |
-          # 创建工作目录
           DEB_ROOT=$(mktemp -d)
           mkdir -p $DEB_ROOT/DEBIAN
           mkdir -p $DEB_ROOT/usr/bin
           mkdir -p $DEB_ROOT/usr/lib/one-kvm
           mkdir -p $DEB_ROOT/lib/systemd/system
 
-          # 复制二进制
           cp "$BINARY" $DEB_ROOT/usr/bin/one-kvm
           chmod 755 $DEB_ROOT/usr/bin/one-kvm
 
-          # 使用 qemu-arm 进行跨架构依赖分析
-          # 让 ldd 通过 qemu-arm 模拟运行，找出所有 armhf 依赖库
-          echo "正在收集 armhf 依赖库..."
-          LDD_OUTPUT=$(qemu-arm -L /usr/arm-linux-gnueabihf $DEB_ROOT/usr/bin/one-kvm 2>&1 || true)
-          # ldd 直接作用在二进制上，配合 qemu-user-static 也可以直接 ldd 但是需要设置 binfmt
-          # 更简单的做法：直接 ldd 二进制 (因为宿主机安装了 qemu-user-static，可以自动识别 arm 二进制)
+          # 收集 ldd 能找到的所有依赖
+          echo "收集 ldd 依赖..."
           ldd $DEB_ROOT/usr/bin/one-kvm 2>&1 | grep '=> /' | awk '{print $3}' | sort -u | while read lib; do
-            # 只复制真实的 .so 文件，跳过 linux-vdso 等
             if [ -f "$lib" ]; then
               cp -v "$lib" $DEB_ROOT/usr/lib/one-kvm/
             fi
           done
+
+          # 手动添加 libyuv.so（因为 ldd 可能漏掉它）
+          echo "手动下载并添加 libyuv..."
+          LIBYUV_DEB_URL=$(curl -sL "https://packages.debian.org/bookworm/armhf/libyuv0/download" | grep -oP 'href="[^"]*\.deb"' | head -1 | cut -d'"' -f2)
+          if [ -n "$LIBYUV_DEB_URL" ]; then
+            curl -sL "$LIBYUV_DEB_URL" -o /tmp/libyuv0.deb
+            dpkg-deb -x /tmp/libyuv0.deb /tmp/libyuv-extracted
+            cp -v /tmp/libyuv-extracted/usr/lib/arm-linux-gnueabihf/libyuv.so.* $DEB_ROOT/usr/lib/one-kvm/ || true
+            # 如果 libyuv 还依赖 libjpeg，ldd 应该已经收集了，但如果没有，也可以手动加
+            # libjpeg 一般会在 ldd 中，因为 libyuv 依赖它
+          else
+            echo "⚠️ 无法自动下载 libyuv，请手动检查。"
+          fi
 
           # 修改 RPATH
           patchelf --set-rpath '$ORIGIN/../lib/one-kvm' $DEB_ROOT/usr/bin/one-kvm
@@ -115,7 +118,7 @@ jobs:
           Depends: libc6
           Description: One-KVM (self-contained with all dependencies)
            Open and lightweight IP-KVM solution.
-           This package includes all required runtime libraries.
+           This package includes all required runtime libraries, including libyuv.
           Homepage: https://github.com/mofeng-git/One-KVM
           CONTROL_EOF
 
