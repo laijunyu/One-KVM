@@ -15,12 +15,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p release-assets
-          # 下载最新 Release 中第一个匹配 one-kvm*.zip 的文件
-          gh release download --repo "${{ github.repository }}" \
+
+          # 获取最新 Release 的 tag
+          LATEST_TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name')
+          echo "Latest tag: $LATEST_TAG"
+
+          # 下载该 Release 中第一个匹配 one-kvm*.zip 的文件
+          gh release download "$LATEST_TAG" \
+            --repo "${{ github.repository }}" \
             --pattern "one-kvm*.zip" \
             --dir release-assets \
-            --clobber \
-            --latest
+            --clobber
 
           # 解压 zip
           unzip -o release-assets/one-kvm*.zip -d release-assets/extracted
