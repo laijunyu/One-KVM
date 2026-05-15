@@ -148,9 +148,18 @@ jobs:
               # ---------- 编译 One-KVM ----------
               cd /workspace
               sed -i '/rkmpp/d' Cargo.toml
-              # 将 RKMPP 替换为 AV_HWDEVICE_TYPE_NONE，避免类型错误
               find /workspace/libs/hwcodec -name \"*.cpp\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
               find /workspace/libs/hwcodec -name \"*.h\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
+
+              # 修补 v4l2r 的 AV1 控件缺失问题
+              mkdir -p /tmp/v4l2r-fixed
+              curl -L https://crates.io/api/v1/crates/v4l2r/0.0.7/download -o /tmp/v4l2r.crate
+              tar -xzf /tmp/v4l2r.crate -C /tmp/v4l2r-fixed
+              sed -i -e '/av1_film_grain/d' -e '/av1_frame/d' -e '/av1_sequence/d' -e '/av1_tile_group_entry/d' /tmp/v4l2r-fixed/v4l2r-0.0.7/src/controls.rs
+              echo '' >> Cargo.toml
+              echo '[patch.crates-io]' >> Cargo.toml
+              echo 'v4l2r = { path = \"/tmp/v4l2r-fixed/v4l2r-0.0.7\" }' >> Cargo.toml
+
               cargo build --release --target armv7-unknown-linux-gnueabihf
 
               BINARY_PATH=target/armv7-unknown-linux-gnueabihf/release/one-kvm
