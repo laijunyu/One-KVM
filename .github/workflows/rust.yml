@@ -49,8 +49,7 @@ jobs:
                 zlib1g-dev \
                 linux-libc-dev \
                 xz-utils \
-                libva-dev \
-                libopus-dev
+                libva-dev
 
               # ---------- 安装 Node.js 22 LTS ----------
               NODE_VERSION=22.14.0
@@ -73,7 +72,7 @@ jobs:
               source \$HOME/.cargo/env
               rustup target add armv7-unknown-linux-gnueabihf
 
-              # ---------- 构建静态依赖库（libjpeg、libyuv、libvpx、x264、x265）----------
+              # ---------- 构建静态依赖库 ----------
               # 1. libjpeg-turbo
               git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/libjpeg-turbo
               cd /tmp/libjpeg-turbo && mkdir build && cd build
@@ -92,7 +91,7 @@ jobs:
               cd /
               rm -rf /tmp/libyuv
 
-              # 创建 libyuv.pc（强制静态链接 yuv + jpeg，但结束后恢复动态链接方式）
+              # 创建 libyuv.pc（简单形式，让 pkg-config 自行处理静态链接）
               mkdir -p /usr/local/lib/pkgconfig
               echo 'prefix=/usr/local' > /usr/local/lib/pkgconfig/libyuv.pc
               echo 'exec_prefix=\${prefix}' >> /usr/local/lib/pkgconfig/libyuv.pc
@@ -102,7 +101,7 @@ jobs:
               echo 'Name: libyuv' >> /usr/local/lib/pkgconfig/libyuv.pc
               echo 'Description: YUV scaling and conversion library' >> /usr/local/lib/pkgconfig/libyuv.pc
               echo 'Version: 1.0.0' >> /usr/local/lib/pkgconfig/libyuv.pc
-              echo 'Libs: -Wl,-Bstatic -lyuv -ljpeg -Wl,-Bdynamic' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Libs: -L\${libdir} -lyuv -ljpeg' >> /usr/local/lib/pkgconfig/libyuv.pc
               echo 'Cflags: -I\${includedir}' >> /usr/local/lib/pkgconfig/libyuv.pc
 
               # 3. libvpx
@@ -131,8 +130,18 @@ jobs:
               cd /
               rm -rf /tmp/x265
 
+              # 6. 编译静态 opus
+              OPUS_VERSION=1.5.2
+              curl -fsSL https://downloads.xiph.org/releases/opus/opus-\${OPUS_VERSION}.tar.gz -o /tmp/opus.tar.gz
+              tar -xzf /tmp/opus.tar.gz -C /tmp
+              cd /tmp/opus-\${OPUS_VERSION}
+              ./configure --prefix=/usr/local --enable-static --disable-shared --enable-pic
+              make -j\$(nproc) && make install
+              cd /
+              rm -rf /tmp/opus-\${OPUS_VERSION} /tmp/opus.tar.gz
+
               # ---------- 编译静态 FFmpeg ----------
-              FFMPEG_VERSION=5.1.5   # Debian 12 使用 5.x 系列，保持兼容
+              FFMPEG_VERSION=5.1.5
               curl -fsSL https://ffmpeg.org/releases/ffmpeg-\${FFMPEG_VERSION}.tar.xz -o /tmp/ffmpeg.tar.xz
               tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
               cd /tmp/ffmpeg-\${FFMPEG_VERSION}
@@ -144,27 +153,15 @@ jobs:
                 --disable-doc \
                 --disable-ffplay \
                 --disable-ffprobe \
-                --disable-network \
                 --enable-libx264 \
                 --enable-libx265 \
                 --enable-libvpx \
-                --disable-vaapi \
-                --disable-vdpau \
-                --disable-encoders \
-                --disable-muxers \
-                --disable-filters \
-                --disable-bsfs \
-                --disable-protocols \
-                --disable-devices \
-                --disable-hwaccels \
-                --enable-encoder=libx264,libx265,libvpx_vp8,libvpx_vp9 \
-                --enable-muxer=webm,mp4 \
-                --enable-protocol=file \
-                --enable-filter=scale,format \
                 --extra-cflags=\"-I/usr/local/include\" \
                 --extra-ldflags=\"-L/usr/local/lib\"
               make -j\$(nproc)
               make install
+              # 验证 libavcodec 是否可用
+              pkg-config --exists libavcodec || { echo 'FFmpeg libavcodec not found'; exit 1; }
               cd /
               rm -rf /tmp/ffmpeg-\${FFMPEG_VERSION} /tmp/ffmpeg.tar.xz
 
@@ -248,7 +245,7 @@ jobs:
               echo 'exit 0' >> \$PKG_DIR/DEBIAN/prerm
               chmod 755 \$PKG_DIR/DEBIAN/prerm
 
-              # .deb 依赖只保留系统本身就有的底层库，不再需要 FFmpeg 运行时
+              # .deb 依赖只保留系统底层库（Opus 和 FFmpeg 已静态链接）
               echo 'Package: one-kvm' > \$PKG_DIR/DEBIAN/control
               echo \"Version: \${PKG_VER}\" >> \$PKG_DIR/DEBIAN/control
               echo 'Section: admin' >> \$PKG_DIR/DEBIAN/control
