@@ -1,4 +1,4 @@
-name: Package one-kvm from Release (self-contained + libyuv)
+name: Package one-kvm from Release (self-contained, fixed)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - name: Install host dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf dpkg-dev binutils qemu-user-static curl
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Download latest release asset
         env:
@@ -24,108 +22,112 @@ jobs:
 
           # 解压 zip → 得到 .deb
           unzip -o release-assets/one-kvm*.zip -d release-assets/deb-pkg
+
+          # 从 .deb 中提取 one-kvm 二进制到 workspace/binary 目录
           DEB_FILE=$(find release-assets/deb-pkg -name "*.deb" | head -1)
-          echo "DEB_FILE=$DEB_FILE" >> $GITHUB_ENV
+          mkdir -p binary
+          dpkg-deb -x "$DEB_FILE" binary/
 
-          # 从 .deb 中提取二进制文件
-          mkdir -p release-assets/extracted
-          dpkg-deb -x "$DEB_FILE" release-assets/extracted
-
-      - name: Find one-kvm binary and extract version
-        run: |
-          BINARY=$(find release-assets/extracted -type f -name "one-kvm" | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "❌ 未找到 one-kvm 可执行文件！"
-            ls -laR release-assets/extracted
-            exit 1
-          fi
-          chmod +x "$BINARY"
-          echo "BINARY=$BINARY" >> $GITHUB_ENV
-
+          # 提取版本号
           PKG_VER=$(echo "$DEB_FILE" | grep -oP '\d+\.\d+\.\d+' || echo "1.0")
           echo "PKG_VER=$PKG_VER" >> $GITHUB_ENV
 
-      - name: Collect dependencies and package (include libyuv)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Package into self-contained .deb (inside armhf container)
         run: |
-          DEB_ROOT=$(mktemp -d)
-          mkdir -p $DEB_ROOT/DEBIAN
-          mkdir -p $DEB_ROOT/usr/bin
-          mkdir -p $DEB_ROOT/usr/lib/one-kvm
-          mkdir -p $DEB_ROOT/lib/systemd/system
+          docker run --rm --platform linux/arm/v7 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            arm32v7/debian:bookworm-slim \
+            bash -c "
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                patchelf \
+                libyuv0 \
+                dpkg-dev
 
-          cp "$BINARY" $DEB_ROOT/usr/bin/one-kvm
-          chmod 755 $DEB_ROOT/usr/bin/one-kvm
+              # 找到宿主机提取出来的 one-kvm 二进制
+              BINARY=/workspace/binary/usr/bin/one-kvm
+              if [ ! -f \"\$BINARY\" ]; then
+                echo '❌ 未找到 one-kvm 可执行文件！'
+                ls -laR /workspace/binary
+                exit 1
+              fi
 
-          # 收集 ldd 能找到的所有依赖
-          echo "收集 ldd 依赖..."
-          ldd $DEB_ROOT/usr/bin/one-kvm 2>&1 | grep '=> /' | awk '{print $3}' | sort -u | while read lib; do
-            if [ -f "$lib" ]; then
-              cp -v "$lib" $DEB_ROOT/usr/lib/one-kvm/
-            fi
-          done
+              PKG_VER='${{ env.PKG_VER }}'
+              DEB_ROOT=/tmp/one-kvm-deb
+              rm -rf \$DEB_ROOT
+              mkdir -p \$DEB_ROOT/DEBIAN
+              mkdir -p \$DEB_ROOT/usr/bin
+              mkdir -p \$DEB_ROOT/usr/lib/one-kvm
+              mkdir -p \$DEB_ROOT/lib/systemd/system
 
-          # 手动添加 libyuv.so（因为 ldd 可能漏掉它）
-          echo "手动下载并添加 libyuv..."
-          LIBYUV_DEB_URL=$(curl -sL "https://packages.debian.org/bookworm/armhf/libyuv0/download" | grep -oP 'href="[^"]*\.deb"' | head -1 | cut -d'"' -f2)
-          if [ -n "$LIBYUV_DEB_URL" ]; then
-            curl -sL "$LIBYUV_DEB_URL" -o /tmp/libyuv0.deb
-            dpkg-deb -x /tmp/libyuv0.deb /tmp/libyuv-extracted
-            cp -v /tmp/libyuv-extracted/usr/lib/arm-linux-gnueabihf/libyuv.so.* $DEB_ROOT/usr/lib/one-kvm/ || true
-            # 如果 libyuv 还依赖 libjpeg，ldd 应该已经收集了，但如果没有，也可以手动加
-            # libjpeg 一般会在 ldd 中，因为 libyuv 依赖它
-          else
-            echo "⚠️ 无法自动下载 libyuv，请手动检查。"
-          fi
+              cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
+              chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-          # 修改 RPATH
-          patchelf --set-rpath '$ORIGIN/../lib/one-kvm' $DEB_ROOT/usr/bin/one-kvm
+              # 收集所有动态库依赖（容器内已安装 libyuv0，所以会被列出）
+              echo '正在收集依赖库...'
+              ldd \$DEB_ROOT/usr/bin/one-kvm \
+                | grep '=> /' \
+                | awk '{print \$3}' \
+                | sort -u \
+                | while read lib; do
+                    cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
+                  done
 
-          # 生成 DEBIAN 脚本
-          cat > $DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
-          #!/bin/bash
-          set -e
-          if [ "$1" = "configure" ]; then
-            if [ -f /lib/systemd/system/one-kvm.service ]; then
-              systemctl daemon-reload || true
-              systemctl enable one-kvm || true
-              systemctl start one-kvm || true
-            fi
-          fi
-          exit 0
-          POSTINST_EOF
-          chmod 755 $DEB_ROOT/DEBIAN/postinst
+              # 修改 RPATH
+              patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
-          cat > $DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
-          #!/bin/bash
-          set -e
-          if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
-            if [ -f /lib/systemd/system/one-kvm.service ]; then
-              systemctl stop one-kvm || true
-              systemctl disable one-kvm || true
-            fi
-          fi
-          exit 0
-          PRERM_EOF
-          chmod 755 $DEB_ROOT/DEBIAN/prerm
+              # 生成 DEBIAN 控制文件
+              cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
+              #!/bin/bash
+              set -e
+              if [ \"\$1\" = \"configure\" ]; then
+                if [ -f /lib/systemd/system/one-kvm.service ]; then
+                  systemctl daemon-reload || true
+                  systemctl enable one-kvm || true
+                  systemctl start one-kvm || true
+                fi
+              fi
+              exit 0
+              POSTINST_EOF
+              chmod 755 \$DEB_ROOT/DEBIAN/postinst
 
-          cat > $DEB_ROOT/DEBIAN/control << CONTROL_EOF
-          Package: one-kvm
-          Version: ${PKG_VER}
-          Section: admin
-          Priority: optional
-          Architecture: armhf
-          Maintainer: SilentWind
-          Depends: libc6
-          Description: One-KVM (self-contained with all dependencies)
-           Open and lightweight IP-KVM solution.
-           This package includes all required runtime libraries, including libyuv.
-          Homepage: https://github.com/mofeng-git/One-KVM
-          CONTROL_EOF
+              cat > \$DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
+              #!/bin/bash
+              set -e
+              if [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then
+                if [ -f /lib/systemd/system/one-kvm.service ]; then
+                  systemctl stop one-kvm || true
+                  systemctl disable one-kvm || true
+                fi
+              fi
+              exit 0
+              PRERM_EOF
+              chmod 755 \$DEB_ROOT/DEBIAN/prerm
 
-          # 打包
-          OUTPUT_DEB="$GITHUB_WORKSPACE/one-kvm_${PKG_VER}_armhf.deb"
-          dpkg-deb --root-owner-group --build "$DEB_ROOT" "$OUTPUT_DEB"
-          echo "✅ 打包完成: $OUTPUT_DEB"
+              cat > \$DEB_ROOT/DEBIAN/control << CONTROL_EOF
+              Package: one-kvm
+              Version: \${PKG_VER}
+              Section: admin
+              Priority: optional
+              Architecture: armhf
+              Maintainer: SilentWind
+              Depends: libc6
+              Description: One-KVM (self-contained with all dependencies)
+               Open and lightweight IP-KVM solution.
+               This package includes all required runtime libraries, including libyuv.
+              Homepage: https://github.com/mofeng-git/One-KVM
+              CONTROL_EOF
+
+              # 打包到 workspace 目录
+              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_\${PKG_VER}_armhf.deb
+              echo '✅ 打包完成'
+            "
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
