@@ -7,136 +7,122 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf dpkg-dev binutils qemu-user-static
 
-      - name: Set up QEMU (for armhf binary analysis)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
-
-      - name: Download latest release asset and package
+      - name: Download latest release asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 使用 gh CLI 下载最新 one-kvm zip 资产
-          echo "正在获取最新的 Release 资产..."
+          mkdir -p release-assets
           gh release download --repo "${{ github.repository }}" \
             --pattern "one-kvm*.zip" \
             --dir release-assets \
             --clobber
 
-          # 2. 解压 zip 文件
-          mkdir -p release-assets/extracted
-          unzip -o release-assets/one-kvm*.zip -d release-assets/extracted
+          # 解压 zip → 得到 .deb
+          unzip -o release-assets/one-kvm*.zip -d release-assets/deb-pkg
+          DEB_FILE=$(find release-assets/deb-pkg -name "*.deb" | head -1)
+          echo "DEB_FILE=$DEB_FILE" >> $GITHUB_ENV
 
-          # 3. 从解压出的 .deb 包中提取 one-kvm 二进制文件
-          DEB_FILE=$(find release-assets/extracted -name "*.deb" | head -1)
-          if [ -z "$DEB_FILE" ]; then
-            echo "❌ 未找到 .deb 文件！"
+          # 从 .deb 中提取二进制文件
+          mkdir -p release-assets/extracted
+          dpkg-deb -x "$DEB_FILE" release-assets/extracted
+
+      - name: Find one-kvm binary
+        run: |
+          BINARY=$(find release-assets/extracted -type f -name "one-kvm" | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "❌ 未找到 one-kvm 可执行文件！"
             ls -laR release-assets/extracted
             exit 1
           fi
+          chmod +x "$BINARY"
+          echo "BINARY=$BINARY" >> $GITHUB_ENV
 
-          mkdir -p release-assets/deb-root
-          dpkg-deb -x "$DEB_FILE" release-assets/deb-root
+      - name: Extract version
+        run: |
+          # 从 deb 文件名提取版本号
+          PKG_VER=$(echo "$DEB_FILE" | grep -oP '\d+\.\d+\.\d+' || echo "1.0")
+          echo "PKG_VER=$PKG_VER" >> $GITHUB_ENV
 
-          # 4. 查找 one-kvm 可执行文件
-          BINARY=$(find release-assets/deb-root -type f -executable -name "one-kvm" | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "❌ 在 .deb 包中未找到 one-kvm 可执行文件！"
-            ls -laR release-assets/deb-root
-            exit 1
+      - name: Collect dependencies and package
+        run: |
+          # 创建工作目录
+          DEB_ROOT=$(mktemp -d)
+          mkdir -p $DEB_ROOT/DEBIAN
+          mkdir -p $DEB_ROOT/usr/bin
+          mkdir -p $DEB_ROOT/usr/lib/one-kvm
+          mkdir -p $DEB_ROOT/lib/systemd/system
+
+          # 复制二进制
+          cp "$BINARY" $DEB_ROOT/usr/bin/one-kvm
+          chmod 755 $DEB_ROOT/usr/bin/one-kvm
+
+          # 使用 qemu-arm 进行跨架构依赖分析
+          # 让 ldd 通过 qemu-arm 模拟运行，找出所有 armhf 依赖库
+          echo "正在收集 armhf 依赖库..."
+          LDD_OUTPUT=$(qemu-arm -L /usr/arm-linux-gnueabihf $DEB_ROOT/usr/bin/one-kvm 2>&1 || true)
+          # ldd 直接作用在二进制上，配合 qemu-user-static 也可以直接 ldd 但是需要设置 binfmt
+          # 更简单的做法：直接 ldd 二进制 (因为宿主机安装了 qemu-user-static，可以自动识别 arm 二进制)
+          ldd $DEB_ROOT/usr/bin/one-kvm 2>&1 | grep '=> /' | awk '{print $3}' | sort -u | while read lib; do
+            # 只复制真实的 .so 文件，跳过 linux-vdso 等
+            if [ -f "$lib" ]; then
+              cp -v "$lib" $DEB_ROOT/usr/lib/one-kvm/
+            fi
+          done
+
+          # 修改 RPATH
+          patchelf --set-rpath '$ORIGIN/../lib/one-kvm' $DEB_ROOT/usr/bin/one-kvm
+
+          # 生成 DEBIAN 脚本
+          cat > $DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
+          #!/bin/bash
+          set -e
+          if [ "$1" = "configure" ]; then
+            if [ -f /lib/systemd/system/one-kvm.service ]; then
+              systemctl daemon-reload || true
+              systemctl enable one-kvm || true
+              systemctl start one-kvm || true
+            fi
           fi
+          exit 0
+          POSTINST_EOF
+          chmod 755 $DEB_ROOT/DEBIAN/postinst
 
-          # 5. 提取版本号（从 .deb 文件名中尝试）
-          PKG_VER=$(echo "$DEB_FILE" | grep -oP 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^v//' || echo "1.0")
+          cat > $DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
+          #!/bin/bash
+          set -e
+          if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+            if [ -f /lib/systemd/system/one-kvm.service ]; then
+              systemctl stop one-kvm || true
+              systemctl disable one-kvm || true
+            fi
+          fi
+          exit 0
+          PRERM_EOF
+          chmod 755 $DEB_ROOT/DEBIAN/prerm
 
-          echo "二进制文件: $BINARY"
-          echo "版本号: $PKG_VER"
+          cat > $DEB_ROOT/DEBIAN/control << CONTROL_EOF
+          Package: one-kvm
+          Version: ${PKG_VER}
+          Section: admin
+          Priority: optional
+          Architecture: armhf
+          Maintainer: SilentWind
+          Depends: libc6
+          Description: One-KVM (self-contained with all dependencies)
+           Open and lightweight IP-KVM solution.
+           This package includes all required runtime libraries.
+          Homepage: https://github.com/mofeng-git/One-KVM
+          CONTROL_EOF
 
-          # 6. 在 armhf 容器内收集依赖并打包
-          docker run --rm --platform linux/arm/v7 \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            arm32v7/debian:bookworm-slim \
-            bash -c "
-              apt-get update
-              apt-get install -y --no-install-recommends patchelf
-
-              BINARY=/workspace/$BINARY
-              if [ ! -f \"\$BINARY\" ]; then
-                echo '❌ 二进制文件未正确挂载！'
-                exit 1
-              fi
-
-              DEB_ROOT=/tmp/one-kvm-deb
-              rm -rf \$DEB_ROOT
-              mkdir -p \$DEB_ROOT/DEBIAN
-              mkdir -p \$DEB_ROOT/usr/bin
-              mkdir -p \$DEB_ROOT/usr/lib/one-kvm
-              mkdir -p \$DEB_ROOT/lib/systemd/system
-
-              cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
-              chmod 755 \$DEB_ROOT/usr/bin/one-kvm
-
-              # 收集所有动态库依赖
-              echo '正在收集依赖库...'
-              ldd \$DEB_ROOT/usr/bin/one-kvm \
-                | grep '=> /' \
-                | awk '{print \$3}' \
-                | sort -u \
-                | while read lib; do
-                    cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
-                  done
-
-              patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
-
-              # 生成 DEBIAN 控制文件
-              cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
-              #!/bin/bash
-              set -e
-              if [ \"\$1\" = \"configure\" ]; then
-                if [ -f /lib/systemd/system/one-kvm.service ]; then
-                  systemctl daemon-reload || true
-                  systemctl enable one-kvm || true
-                  systemctl start one-kvm || true
-                fi
-              fi
-              exit 0
-              POSTINST_EOF
-              chmod 755 \$DEB_ROOT/DEBIAN/postinst
-
-              cat > \$DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
-              #!/bin/bash
-              set -e
-              if [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then
-                if [ -f /lib/systemd/system/one-kvm.service ]; then
-                  systemctl stop one-kvm || true
-                  systemctl disable one-kvm || true
-                fi
-              fi
-              exit 0
-              PRERM_EOF
-              chmod 755 \$DEB_ROOT/DEBIAN/prerm
-
-              cat > \$DEB_ROOT/DEBIAN/control << CONTROL_EOF
-              Package: one-kvm
-              Version: $PKG_VER
-              Section: admin
-              Priority: optional
-              Architecture: armhf
-              Maintainer: SilentWind
-              Depends: libc6
-              Description: One-KVM (self-contained with all dependencies)
-               Open and lightweight IP-KVM solution.
-               This package includes all required runtime libraries.
-              Homepage: https://github.com/mofeng-git/One-KVM
-              CONTROL_EOF
-
-              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_\${PKG_VER}_armhf.deb
-              echo '✅ 打包完成！'
-            "
+          # 打包
+          OUTPUT_DEB="$GITHUB_WORKSPACE/one-kvm_${PKG_VER}_armhf.deb"
+          dpkg-deb --root-owner-group --build "$DEB_ROOT" "$OUTPUT_DEB"
+          echo "✅ 打包完成: $OUTPUT_DEB"
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
