@@ -16,33 +16,39 @@ jobs:
           platforms: arm
 
       - name: Download latest release asset and package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           docker run --rm --platform linux/arm/v7 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
+            -e GITHUB_TOKEN="$GITHUB_TOKEN" \
             arm32v7/debian:bookworm-slim \
             bash -c "
               apt-get update
               apt-get install -y --no-install-recommends \
-                curl unzip patchelf
+                curl unzip patchelf jq
 
-              # 获取最新 Release 的下载 URL
+              # 获取最新 Release 信息
               API_URL='https://api.github.com/repos/${{ github.repository }}/releases/latest'
-              echo '正在获取最新 Release 信息...'
-              DOWNLOAD_URL=\$(curl -sL \${API_URL} | grep 'browser_download_url' | grep 'one-kvm-armhf-deb.zip' | head -1 | cut -d'\"' -f4)
-              if [ -z \"\$DOWNLOAD_URL\" ]; then
-                echo '❌ 未找到 one-kvm-armhf-deb.zip 下载链接，请检查 Release 资产'
+              echo '正在获取最新 Release 资产...'
+
+              # 用 jq 匹配第一个 one-kvm*.zip 资产
+              ASSET_URL=\$(curl -sL -H \"Authorization: token \${GITHUB_TOKEN}\" \"\${API_URL}\" | jq -r '.assets[] | select(.name | test(\"one-kvm.*\\\\.zip\")) | .browser_download_url' | head -1)
+
+              if [ -z \"\$ASSET_URL\" ]; then
+                echo '❌ 未找到匹配 one-kvm*.zip 的资产。当前 Release 包含的资产：'
+                curl -sL -H \"Authorization: token \${GITHUB_TOKEN}\" \"\${API_URL}\" | jq -r '.assets[].name'
                 exit 1
               fi
 
-              # 下载 zip 文件
-              echo \"正在下载最新 Release 资产: \$DOWNLOAD_URL\"
-              curl -sL \"\$DOWNLOAD_URL\" -o /workspace/one-kvm-armhf-deb.zip
+              echo \"下载: \$ASSET_URL\"
+              curl -sL \"\$ASSET_URL\" -o /workspace/asset.zip
 
               # 解压
-              unzip -o /workspace/one-kvm-armhf-deb.zip -d /workspace/extracted
+              unzip -o /workspace/asset.zip -d /workspace/extracted
 
-              # 查找 one-kvm 二进制文件
+              # 查找 one-kvm 可执行文件
               BINARY=\$(find /workspace/extracted -type f -executable -name 'one-kvm' | head -1)
               if [ -z \"\$BINARY\" ]; then
                 echo '❌ 在解压后的文件中未找到 one-kvm 可执行文件！'
@@ -50,8 +56,8 @@ jobs:
                 exit 1
               fi
 
-              # 提取版本号
-              PKG_VER=\$(echo \"\$DOWNLOAD_URL\" | grep -oP 'v[0-9.]+' | sed 's/^v//')
+              # 提取版本号（从 zip 文件名中尝试）
+              PKG_VER=\$(echo \"\$ASSET_URL\" | grep -oP 'v[0-9.]+' | sed 's/^v//')
               if [ -z \"\$PKG_VER\" ]; then
                 PKG_VER='1.0'
               fi
@@ -66,7 +72,7 @@ jobs:
               cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
               chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-              # 收集所有动态库依赖（包括依赖的依赖）
+              # 收集所有动态库依赖
               echo '正在收集依赖库...'
               ldd \$DEB_ROOT/usr/bin/one-kvm \
                 | grep '=> /' \
@@ -76,10 +82,10 @@ jobs:
                     cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
                   done
 
-              # 修改 RPATH，使其优先从私有库目录加载
+              # 修改 RPATH
               patchelf --set-rpath '\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
-              # 生成 postinst
+              # 生成 postinst / prerm / control
               cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
               #!/bin/bash
               set -e
@@ -94,7 +100,6 @@ jobs:
               POSTINST_EOF
               chmod 755 \$DEB_ROOT/DEBIAN/postinst
 
-              # 生成 prerm
               cat > \$DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
               #!/bin/bash
               set -e
@@ -108,7 +113,6 @@ jobs:
               PRERM_EOF
               chmod 755 \$DEB_ROOT/DEBIAN/prerm
 
-              # 生成 control
               cat > \$DEB_ROOT/DEBIAN/control << CONTROL_EOF
               Package: one-kvm
               Version: \${PKG_VER}
