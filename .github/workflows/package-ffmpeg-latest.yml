@@ -32,10 +32,18 @@ jobs:
 
           # 提取二进制（兼容 deb 包或裸文件）
           mkdir -p binary
+          # 先尝试 deb
           if ls release-assets/extracted/*.deb 1> /dev/null 2>&1; then
             dpkg-deb -x release-assets/extracted/*.deb binary/
           else
-            cp $(find release-assets/extracted -type f -executable -name 'one-kvm') binary/
+            # 否则复制找到的任何可执行文件（可能名字不是 one-kvm，但留作后备）
+            cp $(find release-assets/extracted -type f -executable | head -1) binary/ || true
+          fi
+
+          # 确保 binary 目录下有一个 one-kvm 文件（用于后续 ldd）
+          # 如果 binary/usr/bin/one-kvm 存在，将其拷贝到 binary/ 根目录
+          if [ -f binary/usr/bin/one-kvm ]; then
+            cp binary/usr/bin/one-kvm binary/one-kvm
           fi
 
       - name: Set up QEMU
@@ -55,11 +63,14 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends binutils
 
-              BINARY=/workspace/binary/one-kvm
-              if [ ! -f \"\$BINARY\" ]; then
-                echo '找不到 one-kvm 二进制'
+              # 自动搜索 one-kvm 二进制
+              BINARY=\$(find /workspace/binary -type f -executable -name 'one-kvm' | head -1)
+              if [ -z \"\$BINARY\" ]; then
+                echo '找不到 one-kvm 二进制，目录内容如下：'
+                ls -laR /workspace/binary
                 exit 1
               fi
+              echo \"使用二进制: \$BINARY\"
 
               echo '分析依赖并提取 FFmpeg 相关库...'
               LDD_OUTPUT=\$(ldd \"\$BINARY\")
