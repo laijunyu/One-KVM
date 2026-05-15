@@ -1,4 +1,4 @@
-name: Package one-kvm from Release (self-contained, final)
+name: Package one-kvm from Release (self-contained, final v3)
 
 on:
   workflow_dispatch:
@@ -20,10 +20,7 @@ jobs:
             --dir release-assets \
             --clobber
 
-          # 解压 zip → 得到 .deb
           unzip -o release-assets/one-kvm*.zip -d release-assets/deb-pkg
-
-          # 从 .deb 中提取 one-kvm 二进制到 binary 目录
           DEB_FILE=$(find release-assets/deb-pkg -name "*.deb" | head -1)
           if [ -z "$DEB_FILE" ]; then
             echo "❌ 未找到 .deb 文件！"
@@ -53,6 +50,7 @@ jobs:
               apt-get install -y --no-install-recommends \
                 patchelf \
                 libyuv0 \
+                libjpeg62-turbo \
                 dpkg-dev
 
               BINARY=/workspace/binary/usr/bin/one-kvm
@@ -73,7 +71,8 @@ jobs:
               cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
               chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-              echo '=== 3. 收集依赖库 ==='
+              echo '=== 3. 强制复制所有已知依赖（包括 libyuv 和 libjpeg）==='
+              # 复制 ldd 找到的库（可能不完整）
               ldd \$DEB_ROOT/usr/bin/one-kvm \
                 | grep '=> /' \
                 | awk '{print \$3}' \
@@ -84,20 +83,33 @@ jobs:
                     fi
                   done
 
+              # 强制复制 libyuv 的 .so 文件
+              echo '--- 强制添加 libyuv ---'
+              dpkg -L libyuv0 | grep '\.so\.' | while read sofile; do
+                if [ -f \"\$sofile\" ]; then
+                  cp -v \"\$sofile\" \$DEB_ROOT/usr/lib/one-kvm/
+                fi
+              done
+
+              # 强制复制 libjpeg 的 .so 文件（libyuv 的依赖）
+              echo '--- 强制添加 libjpeg ---'
+              dpkg -L libjpeg62-turbo | grep '\.so\.' | while read sofile; do
+                if [ -f \"\$sofile\" ]; then
+                  cp -v \"\$sofile\" \$DEB_ROOT/usr/lib/one-kvm/
+                fi
+              done
+
               echo '=== 4. 修改 RPATH ==='
               patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
               echo '=== 5. 生成 DEBIAN 控制文件 ==='
 
-              # postinst
               printf '#!/bin/bash\nset -e\nif [ \"\$1\" = \"configure\" ]; then\n  if [ -f /lib/systemd/system/one-kvm.service ]; then\n    systemctl daemon-reload || true\n    systemctl enable one-kvm || true\n    systemctl start one-kvm || true\n  fi\nfi\nexit 0\n' > \$DEB_ROOT/DEBIAN/postinst
               chmod 755 \$DEB_ROOT/DEBIAN/postinst
 
-              # prerm
               printf '#!/bin/bash\nset -e\nif [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then\n  if [ -f /lib/systemd/system/one-kvm.service ]; then\n    systemctl stop one-kvm || true\n    systemctl disable one-kvm || true\n  fi\nfi\nexit 0\n' > \$DEB_ROOT/DEBIAN/prerm
               chmod 755 \$DEB_ROOT/DEBIAN/prerm
 
-              # control
               printf 'Package: one-kvm\nVersion: 1.0\nSection: admin\nPriority: optional\nArchitecture: armhf\nMaintainer: SilentWind\nDepends: libc6\nDescription: One-KVM (self-contained with all dependencies)\n Open and lightweight IP-KVM solution.\n This package includes all required runtime libraries.\nHomepage: https://github.com/mofeng-git/One-KVM\n' > \$DEB_ROOT/DEBIAN/control
 
               echo '=== 6. 打包 .deb ==='
