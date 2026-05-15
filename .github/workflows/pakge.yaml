@@ -1,0 +1,112 @@
+name: Package One-KVM self-contained .deb
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-name:
+        description: 'Name of the artifact containing the one-kvm binary'
+        required: true
+        default: 'one-kvm-binary'
+      version:
+        description: 'Package version'
+        required: true
+        default: '0.2.0'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download one-kvm binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact-name }}
+          path: ./binary
+
+      - name: Set up QEMU (for armhf binary inspection)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Package into self-contained .deb
+        run: |
+          # 在 armhf 容器中分析二进制并打包（因为 ldd 需要同架构）
+          docker run --rm --platform linux/arm/v7 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            arm32v7/debian:bookworm-slim \
+            bash -c "
+              apt-get update
+              apt-get install -y --no-install-recommends patchelf
+
+              BINARY_PATH=/workspace/binary/one-kvm
+              if [ ! -f \"\$BINARY_PATH\" ]; then
+                echo \"ERROR: one-kvm binary not found at \$BINARY_PATH\"
+                exit 1
+              fi
+
+              PKG_VER='${{ github.event.inputs.version }}'
+              DEB_ROOT=/tmp/one-kvm-deb
+              rm -rf \$DEB_ROOT
+              mkdir -p \$DEB_ROOT/DEBIAN
+              mkdir -p \$DEB_ROOT/usr/bin
+              mkdir -p \$DEB_ROOT/usr/lib/one-kvm
+              mkdir -p \$DEB_ROOT/lib/systemd/system
+
+              cp \$BINARY_PATH \$DEB_ROOT/usr/bin/one-kvm
+              chmod 755 \$DEB_ROOT/usr/bin/one-kvm
+
+              # 分析并复制所有动态库依赖
+              echo 'Collecting shared libraries...'
+              ldd \$DEB_ROOT/usr/bin/one-kvm | grep '=> /' | awk '{print \$3}' | while read lib; do
+                cp -v \"\$lib\" \$DEB_ROOT/usr/lib/one-kvm/
+              done
+
+              # 修改 RPATH，让程序优先从 ../lib/one-kvm 加载库
+              patchelf --set-rpath '\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
+
+              # 生成 postinst / prerm / control
+              echo '#!/bin/bash' > \$DEB_ROOT/DEBIAN/postinst
+              echo 'set -e' >> \$DEB_ROOT/DEBIAN/postinst
+              echo 'if [ \"\$1\" = \"configure\" ]; then' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '  # 如果需要，可以在这里添加 systemd 服务启用' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '  if [ -f /lib/systemd/system/one-kvm.service ]; then' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '    systemctl daemon-reload || true' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '    systemctl enable one-kvm || true' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '    systemctl start one-kvm || true' >> \$DEB_ROOT/DEBIAN/postinst
+              echo '  fi' >> \$DEB_ROOT/DEBIAN/postinst
+              echo 'fi' >> \$DEB_ROOT/DEBIAN/postinst
+              echo 'exit 0' >> \$DEB_ROOT/DEBIAN/postinst
+              chmod 755 \$DEB_ROOT/DEBIAN/postinst
+
+              echo '#!/bin/bash' > \$DEB_ROOT/DEBIAN/prerm
+              echo 'set -e' >> \$DEB_ROOT/DEBIAN/prerm
+              echo 'if [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then' >> \$DEB_ROOT/DEBIAN/prerm
+              echo '  if [ -f /lib/systemd/system/one-kvm.service ]; then' >> \$DEB_ROOT/DEBIAN/prerm
+              echo '    systemctl stop one-kvm || true' >> \$DEB_ROOT/DEBIAN/prerm
+              echo '    systemctl disable one-kvm || true' >> \$DEB_ROOT/DEBIAN/prerm
+              echo '  fi' >> \$DEB_ROOT/DEBIAN/prerm
+              echo 'fi' >> \$DEB_ROOT/DEBIAN/prerm
+              echo 'exit 0' >> \$DEB_ROOT/DEBIAN/prerm
+              chmod 755 \$DEB_ROOT/DEBIAN/prerm
+
+              echo 'Package: one-kvm' > \$DEB_ROOT/DEBIAN/control
+              echo \"Version: \${PKG_VER}\" >> \$DEB_ROOT/DEBIAN/control
+              echo 'Section: admin' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Priority: optional' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Architecture: armhf' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Maintainer: SilentWind' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Depends: libc6' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Description: One-KVM (self-contained)' >> \$DEB_ROOT/DEBIAN/control
+              echo ' Open and lightweight IP-KVM solution.' >> \$DEB_ROOT/DEBIAN/control
+              echo ' This package bundles all required runtime libraries.' >> \$DEB_ROOT/DEBIAN/control
+              echo 'Homepage: https://github.com/mofeng-git/One-KVM' >> \$DEB_ROOT/DEBIAN/control
+
+              dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/one-kvm_selfcontained.deb
+              echo 'Package created.'
+            "
+
+      - name: Upload final .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-selfcontained-deb
+          path: one-kvm_selfcontained.deb
