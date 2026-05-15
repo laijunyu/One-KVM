@@ -19,31 +19,43 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 在宿主机直接使用 gh CLI 下载最新的 one-kvm zip 资产
+          # 1. 使用 gh CLI 下载最新 one-kvm zip 资产
           echo "正在获取最新的 Release 资产..."
           gh release download --repo "${{ github.repository }}" \
             --pattern "one-kvm*.zip" \
             --dir release-assets \
             --clobber
 
-          # 解压并找到二进制文件
+          # 2. 解压 zip 文件
           mkdir -p release-assets/extracted
           unzip -o release-assets/one-kvm*.zip -d release-assets/extracted
-          BINARY=$(find release-assets/extracted -type f -executable -name 'one-kvm' | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "❌ 在解压后的文件中未找到 one-kvm 可执行文件！"
+
+          # 3. 从解压出的 .deb 包中提取 one-kvm 二进制文件
+          DEB_FILE=$(find release-assets/extracted -name "*.deb" | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 .deb 文件！"
             ls -laR release-assets/extracted
             exit 1
           fi
 
-          # 提取版本号（从 zip 文件名中提取）
-          ZIP_NAME=$(ls release-assets/one-kvm*.zip | head -1)
-          PKG_VER=$(echo "$ZIP_NAME" | grep -oP 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^v//' || echo "1.0")
+          mkdir -p release-assets/deb-root
+          dpkg-deb -x "$DEB_FILE" release-assets/deb-root
+
+          # 4. 查找 one-kvm 可执行文件
+          BINARY=$(find release-assets/deb-root -type f -executable -name "one-kvm" | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "❌ 在 .deb 包中未找到 one-kvm 可执行文件！"
+            ls -laR release-assets/deb-root
+            exit 1
+          fi
+
+          # 5. 提取版本号（从 .deb 文件名中尝试）
+          PKG_VER=$(echo "$DEB_FILE" | grep -oP 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^v//' || echo "1.0")
 
           echo "二进制文件: $BINARY"
           echo "版本号: $PKG_VER"
 
-          # 进入 armhf 容器内进行依赖分析和打包
+          # 6. 在 armhf 容器内收集依赖并打包
           docker run --rm --platform linux/arm/v7 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
@@ -54,7 +66,7 @@ jobs:
 
               BINARY=/workspace/$BINARY
               if [ ! -f \"\$BINARY\" ]; then
-                echo '❌ 二进制文件未挂载正确！'
+                echo '❌ 二进制文件未正确挂载！'
                 exit 1
               fi
 
@@ -68,7 +80,7 @@ jobs:
               cp \$BINARY \$DEB_ROOT/usr/bin/one-kvm
               chmod 755 \$DEB_ROOT/usr/bin/one-kvm
 
-              # 收集所有依赖
+              # 收集所有动态库依赖
               echo '正在收集依赖库...'
               ldd \$DEB_ROOT/usr/bin/one-kvm \
                 | grep '=> /' \
@@ -80,7 +92,7 @@ jobs:
 
               patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
-              # DEBIAN 控制文件
+              # 生成 DEBIAN 控制文件
               cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
               #!/bin/bash
               set -e
