@@ -1,4 +1,4 @@
-name: Package one-kvm from Release (self-contained)
+name: Package one-kvm from Release (self-contained, final)
 
 on:
   workflow_dispatch:
@@ -42,7 +42,6 @@ jobs:
       - name: Package self-contained .deb (armhf container)
         run: |
           mkdir -p output
-
           docker run --rm --platform linux/arm/v7 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
@@ -89,46 +88,17 @@ jobs:
               patchelf --set-rpath '\\\$ORIGIN/../lib/one-kvm' \$DEB_ROOT/usr/bin/one-kvm
 
               echo '=== 5. 生成 DEBIAN 控制文件 ==='
-              cat > \$DEB_ROOT/DEBIAN/postinst << 'POSTINST_EOF'
-              #!/bin/bash
-              set -e
-              if [ \"\$1\" = \"configure\" ]; then
-                if [ -f /lib/systemd/system/one-kvm.service ]; then
-                  systemctl daemon-reload || true
-                  systemctl enable one-kvm || true
-                  systemctl start one-kvm || true
-                fi
-              fi
-              exit 0
-              POSTINST_EOF
+
+              # postinst
+              printf '#!/bin/bash\nset -e\nif [ \"\$1\" = \"configure\" ]; then\n  if [ -f /lib/systemd/system/one-kvm.service ]; then\n    systemctl daemon-reload || true\n    systemctl enable one-kvm || true\n    systemctl start one-kvm || true\n  fi\nfi\nexit 0\n' > \$DEB_ROOT/DEBIAN/postinst
               chmod 755 \$DEB_ROOT/DEBIAN/postinst
 
-              cat > \$DEB_ROOT/DEBIAN/prerm << 'PRERM_EOF'
-              #!/bin/bash
-              set -e
-              if [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then
-                if [ -f /lib/systemd/system/one-kvm.service ]; then
-                  systemctl stop one-kvm || true
-                  systemctl disable one-kvm || true
-                fi
-              fi
-              exit 0
-              PRERM_EOF
+              # prerm
+              printf '#!/bin/bash\nset -e\nif [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then\n  if [ -f /lib/systemd/system/one-kvm.service ]; then\n    systemctl stop one-kvm || true\n    systemctl disable one-kvm || true\n  fi\nfi\nexit 0\n' > \$DEB_ROOT/DEBIAN/prerm
               chmod 755 \$DEB_ROOT/DEBIAN/prerm
 
-              cat > \$DEB_ROOT/DEBIAN/control << CONTROL_EOF
-              Package: one-kvm
-              Version: 1.0
-              Section: admin
-              Priority: optional
-              Architecture: armhf
-              Maintainer: SilentWind
-              Depends: libc6
-              Description: One-KVM (self-contained with all dependencies)
-               Open and lightweight IP-KVM solution.
-               This package includes all required runtime libraries, including libyuv.
-              Homepage: https://github.com/mofeng-git/One-KVM
-              CONTROL_EOF
+              # control
+              printf 'Package: one-kvm\nVersion: 1.0\nSection: admin\nPriority: optional\nArchitecture: armhf\nMaintainer: SilentWind\nDepends: libc6\nDescription: One-KVM (self-contained with all dependencies)\n Open and lightweight IP-KVM solution.\n This package includes all required runtime libraries.\nHomepage: https://github.com/mofeng-git/One-KVM\n' > \$DEB_ROOT/DEBIAN/control
 
               echo '=== 6. 打包 .deb ==='
               dpkg-deb --root-owner-group --build \$DEB_ROOT /workspace/output/one-kvm_armhf_selfcontained.deb
