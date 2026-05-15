@@ -1,0 +1,87 @@
+name: Package FFmpeg dependencies (latest release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package-ffmpeg-libs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download latest release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          # 下载最新 Release 中第一个匹配 one-kvm*.zip 的文件
+          gh release download --repo "${{ github.repository }}" \
+            --pattern "one-kvm*.zip" \
+            --dir release-assets \
+            --clobber \
+            --latest
+
+          # 解压 zip
+          unzip -o release-assets/one-kvm*.zip -d release-assets/extracted
+
+          # 提取二进制（兼容 deb 包或裸文件）
+          mkdir -p binary
+          if ls release-assets/extracted/*.deb 1> /dev/null 2>&1; then
+            dpkg-deb -x release-assets/extracted/*.deb binary/
+          else
+            cp $(find release-assets/extracted -type f -executable -name 'one-kvm') binary/
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Collect FFmpeg libraries in armhf container
+        run: |
+          mkdir -p ffmpeg-libs
+
+          docker run --rm --platform linux/arm/v7 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            arm32v7/debian:bookworm-slim \
+            bash -c "
+              apt-get update
+              apt-get install -y --no-install-recommends binutils
+
+              BINARY=/workspace/binary/one-kvm
+              if [ ! -f \"\$BINARY\" ]; then
+                echo '找不到 one-kvm 二进制'
+                exit 1
+              fi
+
+              echo '分析依赖并提取 FFmpeg 相关库...'
+              LDD_OUTPUT=\$(ldd \"\$BINARY\")
+              echo \"\$LDD_OUTPUT\"
+
+              echo \"\$LDD_OUTPUT\" \
+                | grep '=> /' \
+                | awk '{print \$3}' \
+                | grep -iE 'libav|libsw|libpostproc|libopus|libvpx|libx264|libx265|libmp3lame|libtheora|libvorbis|libspeex|libsoxr|libchromaprint|libsnappy|libdav1d|libaom|libwebp|libssl|libcrypto' \
+                | sort -u \
+                | while read lib; do
+                    if [ -f \"\$lib\" ]; then
+                      cp -v \"\$lib\" /workspace/ffmpeg-libs/
+                    fi
+                  done
+
+              echo '收集完成:'
+              ls -la /workspace/ffmpeg-libs/
+            "
+
+      - name: Package libraries
+        run: |
+          tar -czf ffmpeg-libs-latest.tar.gz -C ffmpeg-libs .
+          ls -lh ffmpeg-libs-latest.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-libs-latest
+          path: ffmpeg-libs-latest.tar.gz
