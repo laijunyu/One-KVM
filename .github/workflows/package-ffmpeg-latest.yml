@@ -1,4 +1,4 @@
-name: Package FFmpeg dependencies (latest release)
+name: Package FFmpeg dependencies (latest release, Ubuntu 22.04 libs)
 
 on:
   workflow_dispatch:
@@ -32,16 +32,13 @@ jobs:
 
           # 提取二进制（兼容 deb 包或裸文件）
           mkdir -p binary
-          # 先尝试 deb
           if ls release-assets/extracted/*.deb 1> /dev/null 2>&1; then
             dpkg-deb -x release-assets/extracted/*.deb binary/
           else
-            # 否则复制找到的任何可执行文件（可能名字不是 one-kvm，但留作后备）
             cp $(find release-assets/extracted -type f -executable | head -1) binary/ || true
           fi
 
-          # 确保 binary 目录下有一个 one-kvm 文件（用于后续 ldd）
-          # 如果 binary/usr/bin/one-kvm 存在，将其拷贝到 binary/ 根目录
+          # 确保 binary 根目录有 one-kvm（方便后续 ldd 验证，可选）
           if [ -f binary/usr/bin/one-kvm ]; then
             cp binary/usr/bin/one-kvm binary/one-kvm
           fi
@@ -51,7 +48,7 @@ jobs:
         with:
           platforms: arm
 
-      - name: Collect FFmpeg libraries in armhf container
+      - name: Download Ubuntu 22.04 libraries and package
         run: |
           mkdir -p ffmpeg-libs
 
@@ -61,33 +58,43 @@ jobs:
             arm32v7/debian:bookworm-slim \
             bash -c "
               apt-get update
-              apt-get install -y --no-install-recommends binutils
+              apt-get install -y --no-install-recommends curl dpkg-dev
 
-              # 自动搜索 one-kvm 二进制
-              BINARY=\$(find /workspace/binary -type f -executable -name 'one-kvm' | head -1)
-              if [ -z \"\$BINARY\" ]; then
-                echo '找不到 one-kvm 二进制，目录内容如下：'
-                ls -laR /workspace/binary
-                exit 1
-              fi
-              echo \"使用二进制: \$BINARY\"
+              # Ubuntu 22.04 的 armhf 库包列表（根据之前的 ldd 缺失项）
+              # 可随时补充更多需要的包
+              UBUNTU_MIRROR='http://ports.ubuntu.com/pool/main'
 
-              echo '分析依赖并提取 FFmpeg 相关库...'
-              LDD_OUTPUT=\$(ldd \"\$BINARY\")
-              echo \"\$LDD_OUTPUT\"
+              # 下载函数
+              download_and_extract() {
+                  local pkg=\$1
+                  local url=\$2
+                  echo \"下载: \${pkg}\"
+                  curl -sL \"\$url\" -o /tmp/\${pkg}.deb
+                  dpkg-deb -x /tmp/\${pkg}.deb /tmp/\${pkg}-extracted
+                  # 复制所有 .so 文件到输出目录
+                  find /tmp/\${pkg}-extracted -name '*.so*' -exec cp -v {} /workspace/ffmpeg-libs/ \;
+                  rm -rf /tmp/\${pkg}.deb /tmp/\${pkg}-extracted
+              }
 
-              echo \"\$LDD_OUTPUT\" \
-                | grep '=> /' \
-                | awk '{print \$3}' \
-                | grep -iE 'libav|libsw|libpostproc|libopus|libvpx|libx264|libx265|libmp3lame|libtheora|libvorbis|libspeex|libsoxr|libchromaprint|libsnappy|libdav1d|libaom|libwebp|libssl|libcrypto' \
-                | sort -u \
-                | while read lib; do
-                    if [ -f \"\$lib\" ]; then
-                      cp -v \"\$lib\" /workspace/ffmpeg-libs/
-                    fi
-                  done
+              # 必需的库（libopus, libavutil, libavcodec）
+              download_and_extract 'libopus0' \\
+                '\${UBUNTU_MIRROR}/o/opus/libopus0_1.3.1-0.1_armhf.deb'
+              download_and_extract 'libavutil57' \\
+                '\${UBUNTU_MIRROR}/f/ffmpeg/libavutil57_7%3a5.1.3-1ubuntu1_armhf.deb'
+              download_and_extract 'libavcodec59' \\
+                '\${UBUNTU_MIRROR}/f/ffmpeg/libavcodec59_7%3a5.1.3-1ubuntu1_armhf.deb'
 
-              echo '收集完成:'
+              # 可能还依赖这些（根据 libavcodec59 的依赖链自动补齐）
+              download_and_extract 'libswresample4' \\
+                '\${UBUNTU_MIRROR}/f/ffmpeg/libswresample4_7%3a5.1.3-1ubuntu1_armhf.deb'
+              download_and_extract 'libvpx7' \\
+                '\${UBUNTU_MIRROR}/libv/libvpx/libvpx7_1.11.0-2_armhf.deb'
+              download_and_extract 'libx264-164' \\
+                '\${UBUNTU_MIRROR}/x/x264/libx264-164_0.164.3095+gitbaee400-3_armhf.deb'
+              download_and_extract 'libx265-199' \\
+                '\${UBUNTU_MIRROR}/x/x265/libx265-199_3.5-2_armhf.deb'
+
+              echo '收集完成，内容如下：'
               ls -la /workspace/ffmpeg-libs/
             "
 
