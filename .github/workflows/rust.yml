@@ -1,4 +1,4 @@
-name: Build One-KVM static armhf (all-in-one)
+name: Build One-KVM static armhf (all-in-one, fixed)
 
 on:
   push:
@@ -87,19 +87,18 @@ jobs:
               make -j\$(nproc) && make install
               cd / && rm -rf /tmp/libyuv
 
-              # 创建 libyuv.pc（静态链接 yuv + jpeg）
+              # 创建 libyuv.pc（使用 echo 逐行写入，避免 here-document 问题）
               mkdir -p /usr/local/lib/pkgconfig
-              cat > /usr/local/lib/pkgconfig/libyuv.pc << 'EOF'
-              prefix=/usr/local
-              exec_prefix=${prefix}
-              libdir=${exec_prefix}/lib
-              includedir=${prefix}/include
-              Name: libyuv
-              Description: YUV library
-              Version: 1.0.0
-              Libs: -L${libdir} -lyuv -ljpeg
-              Cflags: -I${includedir}
-              EOF
+              echo 'prefix=/usr/local' > /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'exec_prefix=\${prefix}' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'libdir=\${exec_prefix}/lib' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'includedir=\${prefix}/include' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo '' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Name: libyuv' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Description: YUV library' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Version: 1.0.0' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Libs: -L\${libdir} -lyuv -ljpeg' >> /usr/local/lib/pkgconfig/libyuv.pc
+              echo 'Cflags: -I\${includedir}' >> /usr/local/lib/pkgconfig/libyuv.pc
 
               # 3. libvpx
               git clone --depth 1 https://github.com/webmproject/libvpx /tmp/libvpx
@@ -134,7 +133,7 @@ jobs:
               cd / && rm -rf /tmp/opus-\${OPUS_VERSION} /tmp/opus.tar.gz
 
               # ========== 编译静态 FFmpeg ==========
-              FFMPEG_VERSION=5.1.5   # 与 Debian 12 相同的 5.1 系列
+              FFMPEG_VERSION=5.1.5
               curl -fsSL https://ffmpeg.org/releases/ffmpeg-\${FFMPEG_VERSION}.tar.xz -o /tmp/ffmpeg.tar.xz
               tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
               cd /tmp/ffmpeg-\${FFMPEG_VERSION}
@@ -154,7 +153,6 @@ jobs:
                 --extra-ldflags=\"-L/usr/local/lib\"
               make -j\$(nproc)
               make install
-              # 验证 libavcodec 是否存在
               pkg-config --exists libavcodec || { echo 'FFmpeg libavcodec not found'; exit 1; }
               cd / && rm -rf /tmp/ffmpeg-\${FFMPEG_VERSION} /tmp/ffmpeg.tar.xz
 
@@ -168,13 +166,10 @@ jobs:
 
               # ========== 修复已知编译问题 ==========
               cd /workspace
-              # 移除 rkmpp 特性
               sed -i '/rkmpp/d' Cargo.toml
-              # 替换缺失的 RKMPP 宏
               find /workspace/libs/hwcodec -name \"*.cpp\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
               find /workspace/libs/hwcodec -name \"*.h\" -exec sed -i 's/AV_HWDEVICE_TYPE_RKMPP/AV_HWDEVICE_TYPE_NONE/g' {} \\;
 
-              # 修补 v4l2r AV1 控件缺失问题
               mkdir -p /tmp/v4l2r-fixed
               curl -L https://crates.io/api/v1/crates/v4l2r/0.0.7/download -o /tmp/v4l2r.crate
               tar -xzf /tmp/v4l2r.crate -C /tmp/v4l2r-fixed
@@ -191,10 +186,9 @@ jobs:
                 echo 'Build failed' && exit 1
               fi
 
-              # ========== 验证静态链接 ==========
-              echo 'Checking dynamic symbols (should show only glibc, libdrm, etc., not avcodec):'
+              # 验证静态链接
+              echo 'Checking dynamic symbols:'
               ldd \"\$BINARY\" || true
-              echo 'If you see libavcodec in the list above, static link may have failed.'
 
               # ========== 制作 .deb 包 ==========
               PKG_VER=\$(grep -m1 '^version =' Cargo.toml | cut -d'\"' -f2)
@@ -215,7 +209,7 @@ jobs:
                 cp /workspace/build/one-kvm.service \$DEB_DIR/lib/systemd/system/ || true
               fi
 
-              # DEBIAN 控制文件（用 echo，避免缩进问题）
+              # postinst
               echo '#!/bin/bash' > \$DEB_DIR/DEBIAN/postinst
               echo 'set -e' >> \$DEB_DIR/DEBIAN/postinst
               echo 'if [ \"\$1\" = \"configure\" ]; then' >> \$DEB_DIR/DEBIAN/postinst
@@ -228,6 +222,7 @@ jobs:
               echo 'exit 0' >> \$DEB_DIR/DEBIAN/postinst
               chmod 755 \$DEB_DIR/DEBIAN/postinst
 
+              # prerm
               echo '#!/bin/bash' > \$DEB_DIR/DEBIAN/prerm
               echo 'set -e' >> \$DEB_DIR/DEBIAN/prerm
               echo 'if [ \"\$1\" = \"remove\" ] || [ \"\$1\" = \"deconfigure\" ]; then' >> \$DEB_DIR/DEBIAN/prerm
@@ -239,6 +234,7 @@ jobs:
               echo 'exit 0' >> \$DEB_DIR/DEBIAN/prerm
               chmod 755 \$DEB_DIR/DEBIAN/prerm
 
+              # control
               echo 'Package: one-kvm' > \$DEB_DIR/DEBIAN/control
               echo \"Version: \${PKG_VER}\" >> \$DEB_DIR/DEBIAN/control
               echo 'Section: admin' >> \$DEB_DIR/DEBIAN/control
