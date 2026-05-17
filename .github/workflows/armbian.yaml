@@ -34,10 +34,13 @@ jobs:
           cp -r custom-repo/userpatches armbian-build/
           chmod +x armbian-build/userpatches/customize-image.sh
 
+      # 新增步骤：为跨架构编译启用 QEMU 用户态模拟
+      - name: Set up QEMU for multi-arch builds
+        uses: docker/setup-qemu-action@v3
+
       - name: Build Orange Pi Zero minimal image
         run: |
           cd armbian-build
-          # 直接运行 compile.sh，由 Armbian 自动检测并正确处理 Docker 环境
           ./compile.sh \
             BOARD=orangepizero \
             BRANCH=current \
