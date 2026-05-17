@@ -1,0 +1,59 @@
+name: Build Armbian for Orange Pi Zero (with static IP)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      # 1. 释放磁盘空间
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      # 2. 检出你自己的仓库（包含 userpatches 补丁）
+      - name: Checkout custom repository (for userpatches)
+        uses: actions/checkout@v4
+        with:
+          path: custom-repo
+
+      # 3. 克隆 Armbian 官方构建仓库
+      - name: Checkout armbian/build
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref: main
+          path: armbian-build
+
+      # 4. 将自定义补丁目录复制到构建环境中
+      - name: Copy userpatches into build directory
+        run: |
+          cp -r custom-repo/userpatches armbian-build/
+          chmod +x armbian-build/userpatches/customize-image.sh
+
+      # 5. 用 Docker 构建镜像（会自动执行 userpatches/customize-image.sh）
+      - name: Build Orange Pi Zero minimal image
+        run: |
+          cd armbian-build
+          ./compile.sh docker \
+            BOARD=orangepizero \
+            BRANCH=current \
+            RELEASE=trixie \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=yes \
+            KERNEL_CONFIGURE=no
+
+      # 6. 上传构建产物
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: orangepizero-armbian-static-ip
+          path: armbian-build/output/images/*.img
+          retention-days: 7
