@@ -1,11 +1,14 @@
 name: Build Armbian for Orange Pi Zero (with static IP)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:          # 手动触发，安全可控
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 1. 为整个工作流开启 Node.js 24 环境，消除所有相关警告
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
@@ -33,14 +36,17 @@ jobs:
         run: |
           cp -r custom-repo/userpatches armbian-build/
           chmod +x armbian-build/userpatches/customize-image.sh
+          # 2. 创建 extensions 目录，以消除“Extension search Directory does not exist”报错
+          mkdir -p armbian-build/userpatches/extensions
 
-      # 新增步骤：为跨架构编译启用 QEMU 用户态模拟
+      # 3. 将 docker/setup-qemu-action 升级到 v4
       - name: Set up QEMU for multi-arch builds
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Build Orange Pi Zero minimal image
         run: |
           cd armbian-build
+          # 移除 'docker' 参数，直接运行
           ./compile.sh \
             BOARD=orangepizero \
             BRANCH=current \
