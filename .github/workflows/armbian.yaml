@@ -1,88 +1,70 @@
-name: Build Armbian for Orange Pi Zero (Static IP)
+name: Build and Boot-Test Armbian Image
 
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: '选择 Debian 发行版 (推荐 bookworm)'
+        description: '选择 Debian 发行版'
         required: true
         default: 'bookworm'
         type: choice
         options:
           - bookworm
-          - bullseye
       branch:
-        description: '选择内核分支 (current 为稳定版, edge 为最新测试版)'
+        description: '选择内核分支'
         required: true
         default: 'current'
         type: choice
         options:
           - current
-          - edge
 
 jobs:
+  # ==================== 阶段 1：编译镜像 ====================
   build:
-    name: Build Armbian Image
+    name: Build Image
     runs-on: ubuntu-24.04
-    
+    outputs:
+      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-StaticIP
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 释放宿主机磁盘空间
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           sudo apt-get clean
-          df -h
 
-      # 克隆 Armbian 官方编译框架
       - name: Clone Armbian Build Framework
-        run: |
-          git clone --depth=1 https://github.com/armbian/build armbian-build
+        run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
-      # 注入自定义脚本以配置静态 IP
       - name: Inject Static IP Configuration
         run: |
           mkdir -p armbian-build/userpatches
-          
           cat << 'EOF' > armbian-build/userpatches/customize-image.sh
           #!/bin/bash
           echo "=> Configuring static IP (192.168.114.2/24) via NetworkManager..."
-          
           mkdir -p /etc/NetworkManager/system-connections
-          
           cat << 'NM_EOF' > /etc/NetworkManager/system-connections/Wired-Static.nmconnection
           [connection]
           id=Wired-Static
           type=ethernet
           autoconnect=true
-          
           [ipv4]
           method=manual
           address1=192.168.114.2/24,192.168.114.1
           dns=8.8.8.8;114.114.114.114;
-          
           [ipv6]
           method=auto
           NM_EOF
-          
           chmod 600 /etc/NetworkManager/system-connections/Wired-Static.nmconnection
-          echo "=> Static IP configuration applied successfully."
           EOF
-          
           chmod +x armbian-build/userpatches/customize-image.sh
 
-      # 运行编译脚本（已移除旧版的 KERNEL_ONLY 参数）
+      # 正确运行编译（去掉了 sudo）
       - name: Compile Armbian Image
         run: |
           cd armbian-build
-          
-          sudo ./compile.sh \
+          ./compile.sh \
             BOARD=orangepizero \
             BRANCH=${{ github.event.inputs.branch }} \
             RELEASE=${{ github.event.inputs.release }} \
@@ -93,11 +75,103 @@ jobs:
             EXPERT=yes \
             IGNORE_UPDATES=yes
 
-      # 将生成的镜像作为 Artifact 上传
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
           name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-StaticIP
-          path: armbian-build/output/images/*
-          if-no-files-found: error
+          path: armbian-build/output/images/*.xz
           retention-days: 7
+
+  # ==================== 阶段 2：QEMU 启动测试 ====================
+  boot-test:
+    name: QEMU Boot Test
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install QEMU & Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm xz-utils
+
+      # 下载上一步编译出的镜像
+      - name: Download Artifact Image
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ./workspace
+
+      # 解压并利用 Loop 设备挂载镜像，提取出引导所需的 kernel 和 dtb
+      - name: Extract Boot Files from Image
+        run: |
+          cd ./workspace
+          echo "=> Uncompressing Image..."
+          xz -d *.xz
+          IMAGE_FILE=$(ls *.img)
+          
+          echo "=> Mounting image via loop device..."
+          # losetup --show 可以直接输出分配的 loop 设备名，如 /dev/loop0
+          LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
+          
+          sudo mkdir -p /mnt/armbian
+          # Armbian 镜像通常只有一个分区，即 p1
+          sudo mount "${LOOP_DEV}p1" /mnt/armbian
+          
+          echo "=> Copying kernel and DTB for QEMU emulation..."
+          mkdir -p ../boot-files
+          cp /mnt/armbian/boot/vmlinuz-* ../boot-files/vmlinuz
+          cp /mnt/armbian/boot/uInitrd* ../boot-files/uInitrd || cp /mnt/armbian/boot/initrd.img-* ../boot-files/uInitrd
+          
+          # 因为我们要用 QEMU 的 orangepi-pc 机器，所以提取对应的 DTB 来保证虚拟外设匹配
+          cp /mnt/armbian/boot/dtb/sun8i-h3-orangepi-pc.dtb ../boot-files/dtb || cp /mnt/armbian/boot/dtb-*/sun8i-h3-orangepi-pc.dtb ../boot-files/dtb
+          
+          echo "=> Cleaning up mounts..."
+          sudo umount /mnt/armbian
+          sudo losetup -d "$LOOP_DEV"
+          mv "$IMAGE_FILE" ../armbian.img
+
+      # 核心步骤：在后台拉起 QEMU 并监控串口控制台输出
+      - name: Run QEMU Boot Assertion
+        run: |
+          echo "=> Starting QEMU emulation in background..."
+          # 参数解释：
+          # -M orangepi-pc : 模拟全志 H3 板卡
+          # -append ...    : 指定控制台重定向到 ttyS0 (串口)，指定根分区为第一个 SD 卡分区
+          sudo qemu-system-arm \
+            -M orangepi-pc \
+            -m 1024 \
+            -cpu cortex-a7 \
+            -nographic \
+            -dtb boot-files/dtb \
+            -kernel boot-files/vmlinuz \
+            -initrd boot-files/uInitrd \
+            -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 ro rootwait' \
+            -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
+          
+          QEMU_PID=$!
+          
+          # 循环监控日志，超时时间 180 秒
+          TIMEOUT=180
+          BOOT_SUCCESS=false
+          echo "=> Waiting for system to hit login prompt (Timeout: ${TIMEOUT}s)..."
+          
+          for i in $(seq 1 $TIMEOUT); do
+            # 检查串口日志中是否出现了 Armbian 的欢迎词或 Debian 的登录提示
+            if grep -E "login:|Reached target Multi-User System|Armbian" qemu_serial.log > /dev/null; then
+              echo "✅ [SUCCESS] 镜像成功启动并进入了系统控制台！"
+              BOOT_SUCCESS=true
+              break
+            fi
+            sleep 1
+          done
+          
+          # 强行终止后台的 QEMU 进程
+          sudo kill $QEMU_PID || true
+          
+          echo "=================== QEMU 串口完整日志 ==================="
+          cat qemu_serial.log
+          echo "========================================================"
+          
+          if [ "$BOOT_SUCCESS" = false ]; then
+            echo "❌ [FAILURE] 镜像未能成功引导，或在 180 秒内未到达登录界面。"
+            exit 1
+          fi
