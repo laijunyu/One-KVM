@@ -29,32 +29,26 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. 释放宿主机磁盘空间
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           sudo apt-get clean
 
-      # 2. 在宿主机上提前安装 QEMU 和 binfmt 支持（原生编译必需）
       - name: Install QEMU and Binfmt on Host
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support
 
-      # 3. 卸载并关闭 Docker，逼迫 Armbian 使用宿主机原生编译模式
       - name: Disable Docker to Force Native Build
         run: |
-          echo "=> Stopping and removing Docker to prevent Armbian Docker-in-Docker failure..."
           sudo systemctl stop docker.service docker.socket || true
           sudo systemctl disable docker.service docker.socket || true
           sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
           sudo apt-get autoremove -y
 
-      # 4. 克隆 Armbian 官方编译框架
       - name: Clone Armbian Build Framework
         run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
-      # 5. 注入静态 IP 配置
       - name: Inject Static IP Configuration
         run: |
           mkdir -p armbian-build/userpatches
@@ -78,7 +72,6 @@ jobs:
           EOF
           chmod +x armbian-build/userpatches/customize-image.sh
 
-      # 6. 运行编译脚本（不带 sudo，此时会完美运行在宿主机原生环境）
       - name: Compile Armbian Image
         run: |
           cd armbian-build
@@ -117,12 +110,13 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ./workspace
 
+      # 优化了引导文件的提取逻辑，规避多文件展开导致的 cp 报错
       - name: Extract Boot Files from Image
         run: |
           cd ./workspace
           echo "=> Uncompressing Image..."
           xz -d *.xz
-          IMAGE_FILE=$(ls *.img)
+          IMAGE_FILE=$(ls *.img | head -n 1)
           
           echo "=> Mounting image via loop device..."
           LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
@@ -132,9 +126,18 @@ jobs:
           
           echo "=> Copying kernel and DTB for QEMU emulation..."
           mkdir -p ../boot-files
-          cp /mnt/armbian/boot/vmlinuz-* ../boot-files/vmlinuz
-          cp /mnt/armbian/boot/uInitrd* ../boot-files/uInitrd || cp /mnt/armbian/boot/initrd.img-* ../boot-files/uInitrd
-          cp /mnt/armbian/boot/dtb/sun8i-h3-orangepi-pc.dtb ../boot-files/dtb || cp /mnt/armbian/boot/dtb-*/sun8i-h3-orangepi-pc.dtb ../boot-files/dtb
+          
+          # 精准提取单一内核文件
+          KERNEL_SRC=$(ls /mnt/armbian/boot/vmlinuz-* /mnt/armbian/boot/zImage* 2>/dev/null | head -n 1)
+          cp "$KERNEL_SRC" ../boot-files/vmlinuz
+          
+          # 精准提取单一 Initrd 文件（解决引发报错的地方）
+          INITRD_SRC=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -n 1)
+          cp "$INITRD_SRC" ../boot-files/initrd
+          
+          # 使用 find 精准提取设备树
+          DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h3-orangepi-pc.dtb" | head -n 1)
+          cp "$DTB_SRC" ../boot-files/dtb
           
           echo "=> Cleaning up mounts..."
           sudo umount /mnt/armbian
@@ -151,7 +154,7 @@ jobs:
             -nographic \
             -dtb boot-files/dtb \
             -kernel boot-files/vmlinuz \
-            -initrd boot-files/uInitrd \
+            -initrd boot-files/initrd \
             -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 ro rootwait' \
             -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
           
