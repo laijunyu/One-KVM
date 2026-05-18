@@ -1,63 +1,114 @@
-name: Build Armbian for Orange Pi Zero (with static IP)
+name: Build Armbian for Orange Pi Zero (Static IP)
 
 on:
-  workflow_dispatch:          # 手动触发，安全可控
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '选择 Debian 发行版 (推荐 bookworm)'
+        required: true
+        default: 'bookworm'
+        type: choice
+        options:
+          - bookworm
+          - bullseye
+      branch:
+        description: '选择内核分支 (current 为稳定版, edge 为最新测试版)'
+        required: true
+        default: 'current'
+        type: choice
+        options:
+          - current
+          - edge
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    # 1. 为整个工作流开启 Node.js 24 环境，消除所有相关警告
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    name: Build Armbian Image
+    runs-on: ubuntu-24.04
+    
     steps:
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
-      - name: Checkout custom repository (for userpatches)
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          path: custom-repo
 
-      - name: Checkout armbian/build
-        uses: actions/checkout@v4
-        with:
-          repository: armbian/build
-          ref: main
-          path: armbian-build
-
-      - name: Copy userpatches into build directory
+      # 释放宿主机磁盘空间
+      - name: Free disk space
         run: |
-          cp -r custom-repo/userpatches armbian-build/
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h
+
+      # 克隆 Armbian 官方编译框架
+      - name: Clone Armbian Build Framework
+        run: |
+          git clone --depth=1 https://github.com/armbian/build armbian-build
+
+      # 注入自定义脚本以配置静态 IP (新增步骤)
+      - name: Inject Static IP Configuration
+        run: |
+          mkdir -p armbian-build/userpatches
+          
+          # 创建 customize-image.sh 脚本
+          cat << 'EOF' > armbian-build/userpatches/customize-image.sh
+          #!/bin/bash
+          # 该脚本会在镜像打包前的 chroot 环境中执行
+          
+          echo "=> Configuring static IP (192.168.114.2/24) via NetworkManager..."
+          
+          mkdir -p /etc/NetworkManager/system-connections
+          
+          # 写入 NetworkManager 配置文件
+          # 注意：为了兼容不同内核版本下网卡名称的变化(如 eth0 或 end0)，这里省略了 interface-name，让它自动匹配默认的有线网卡
+          cat << 'NM_EOF' > /etc/NetworkManager/system-connections/Wired-Static.nmconnection
+          [connection]
+          id=Wired-Static
+          type=ethernet
+          autoconnect=true
+          
+          [ipv4]
+          method=manual
+          # 配置 IP 和网关 (假设网关为 192.168.114.1，请根据实际情况修改)
+          address1=192.168.114.2/24,192.168.114.1
+          # 配置公共 DNS
+          dns=8.8.8.8;114.114.114.114;
+          
+          [ipv6]
+          method=auto
+          NM_EOF
+          
+          # 权限必须是 600，否则 NetworkManager 会出于安全原因拒绝加载该文件
+          chmod 600 /etc/NetworkManager/system-connections/Wired-Static.nmconnection
+          
+          echo "=> Static IP configuration applied successfully."
+          EOF
+          
+          # 赋予脚本执行权限
           chmod +x armbian-build/userpatches/customize-image.sh
-          # 2. 创建 extensions 目录，以消除“Extension search Directory does not exist”报错
-          mkdir -p armbian-build/userpatches/extensions
 
-      # 3. 将 docker/setup-qemu-action 升级到 v4
-      - name: Set up QEMU for multi-arch builds
-        uses: docker/setup-qemu-action@v4
-
-      - name: Build Orange Pi Zero minimal image
+      # 运行编译脚本
+      - name: Compile Armbian Image
         run: |
           cd armbian-build
-          # 移除 'docker' 参数，直接运行
-          ./compile.sh \
+          
+          sudo ./compile.sh \
             BOARD=orangepizero \
-            BRANCH=current \
-            RELEASE=trixie \
+            BRANCH=${{ github.event.inputs.branch }} \
+            RELEASE=${{ github.event.inputs.release }} \
             BUILD_DESKTOP=no \
-            BUILD_MINIMAL=yes \
-            KERNEL_CONFIGURE=no
+            BUILD_MINIMAL=no \
+            KERNEL_ONLY=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,xz \
+            EXPERT=yes \
+            IGNORE_UPDATES=yes
 
-      - name: Upload image artifact
+      # 将生成的镜像作为 Artifact 上传
+      - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
-          name: orangepizero-armbian-static-ip
-          path: armbian-build/output/images/*.img
+          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-StaticIP
+          path: armbian-build/output/images/*
+          if-no-files-found: error
           retention-days: 7
