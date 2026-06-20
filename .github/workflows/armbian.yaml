@@ -24,7 +24,7 @@ jobs:
     name: Build Image
     runs-on: ubuntu-24.04
     outputs:
-      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-StaticIP
+      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-DynamicIP
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
       - name: Clone Armbian Build Framework
         run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
-      # ========== 修改点 1：添加内核配置补丁，启用 cedrus VPU 驱动 ==========
+      # ========== 修改点 1：启用 cedrus VPU 驱动（内核补丁） ==========
       - name: Enable Cedrus VPU Driver in Kernel Config
         run: |
           mkdir -p armbian-build/userpatches/kernel/sunxi-current
@@ -59,28 +59,7 @@ jobs:
           CONFIG_V4L2_MEM2MEM_DEV=y
           EOF
 
-      - name: Inject Static IP Configuration
-        run: |
-          mkdir -p armbian-build/userpatches
-          cat << 'EOF' > armbian-build/userpatches/customize-image.sh
-          #!/bin/bash
-          echo "=> Configuring static IP (192.168.114.2/24) via NetworkManager..."
-          mkdir -p /etc/NetworkManager/system-connections
-          cat << 'NM_EOF' > /etc/NetworkManager/system-connections/Wired-Static.nmconnection
-          [connection]
-          id=Wired-Static
-          type=ethernet
-          autoconnect=true
-          [ipv4]
-          method=manual
-          address1=192.168.114.2/24,192.168.114.1
-          dns=8.8.8.8;114.114.114.114;
-          [ipv6]
-          method=auto
-          NM_EOF
-          chmod 600 /etc/NetworkManager/system-connections/Wired-Static.nmconnection
-          EOF
-          chmod +x armbian-build/userpatches/customize-image.sh
+      # ========== 修改点 4：删除静态 IP 注入步骤（已移除），默认 DHCP ==========
 
       - name: Compile Armbian Image
         run: |
@@ -99,7 +78,7 @@ jobs:
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
-          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-StaticIP
+          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-DynamicIP
           path: armbian-build/output/images/*.xz
           retention-days: 7
 
@@ -157,7 +136,6 @@ jobs:
         run: |
           echo "=> Starting QEMU emulation in background..."
           # ========== 修改点 3：调整机器类型为 orangepi-zero ==========
-          # 注意：QEMU 可能不完全支持 orangepi-zero，若失败可回退为 orangepi-pc
           sudo qemu-system-arm \
             -M orangepi-zero \
             -m 1024 \
