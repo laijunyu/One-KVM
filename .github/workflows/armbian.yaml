@@ -49,6 +49,16 @@ jobs:
       - name: Clone Armbian Build Framework
         run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
+      # ========== 修改点 1：添加内核配置补丁，启用 cedrus VPU 驱动 ==========
+      - name: Enable Cedrus VPU Driver in Kernel Config
+        run: |
+          mkdir -p armbian-build/userpatches/kernel/sunxi-current
+          cat << 'EOF' > armbian-build/userpatches/kernel/sunxi-current/cedrus-enable.cfg
+          CONFIG_VIDEO_SUNXI_CEDRUS=m
+          CONFIG_MEDIA_CONTROLLER=y
+          CONFIG_V4L2_MEM2MEM_DEV=y
+          EOF
+
       - name: Inject Static IP Configuration
         run: |
           mkdir -p armbian-build/userpatches
@@ -110,7 +120,6 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ./workspace
 
-      # 优化了引导文件的提取逻辑，规避多文件展开导致的 cp 报错
       - name: Extract Boot Files from Image
         run: |
           cd ./workspace
@@ -131,12 +140,12 @@ jobs:
           KERNEL_SRC=$(ls /mnt/armbian/boot/vmlinuz-* /mnt/armbian/boot/zImage* 2>/dev/null | head -n 1)
           cp "$KERNEL_SRC" ../boot-files/vmlinuz
           
-          # 精准提取单一 Initrd 文件（解决引发报错的地方）
+          # 精准提取单一 Initrd 文件
           INITRD_SRC=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -n 1)
           cp "$INITRD_SRC" ../boot-files/initrd
           
-          # 使用 find 精准提取设备树
-          DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h3-orangepi-pc.dtb" | head -n 1)
+          # ========== 修改点 2：提取正确的设备树（H2+ Orange Pi Zero） ==========
+          DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
           cp "$DTB_SRC" ../boot-files/dtb
           
           echo "=> Cleaning up mounts..."
@@ -147,8 +156,10 @@ jobs:
       - name: Run QEMU Boot Assertion
         run: |
           echo "=> Starting QEMU emulation in background..."
+          # ========== 修改点 3：调整机器类型为 orangepi-zero ==========
+          # 注意：QEMU 可能不完全支持 orangepi-zero，若失败可回退为 orangepi-pc
           sudo qemu-system-arm \
-            -M orangepi-pc \
+            -M orangepi-zero \
             -m 1024 \
             -cpu cortex-a7 \
             -nographic \
