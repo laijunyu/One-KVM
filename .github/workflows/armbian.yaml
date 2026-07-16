@@ -49,17 +49,32 @@ jobs:
       - name: Clone Armbian Build Framework
         run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
-      # ========== 修改点 1：启用 cedrus VPU 驱动（内核补丁） ==========
+      # ========== 修改点 1：启用 VPU 驱动（解码+编码） ==========
       - name: Enable Cedrus VPU Driver in Kernel Config
         run: |
           mkdir -p armbian-build/userpatches/kernel/sunxi-current
           cat << 'EOF' > armbian-build/userpatches/kernel/sunxi-current/cedrus-enable.cfg
           CONFIG_VIDEO_SUNXI_CEDRUS=m
+          CONFIG_VIDEO_SUNXI_CEDRUS_ENC=m
           CONFIG_MEDIA_CONTROLLER=y
           CONFIG_V4L2_MEM2MEM_DEV=y
           EOF
 
-      # ========== 修改点 4：删除静态 IP 注入步骤（已移除），默认 DHCP ==========
+      # ========== 修改点 2 & 3：定制脚本（移除黑名单 + 加载模块） ==========
+      - name: Inject Customize Script
+        run: |
+          mkdir -p armbian-build/userpatches
+          cat << 'EOF' > armbian-build/userpatches/customize-image.sh
+          #!/bin/bash
+          echo "=> Removing blacklist for sunxi_cedrus..."
+          if [ -f /etc/modprobe.d/blacklist-orangepizero.conf ]; then
+            sed -i '/^blacklist sunxi_cedrus/s/^/# /' /etc/modprobe.d/blacklist-orangepizero.conf
+          fi
+          echo "=> Ensuring cedrus module loads at boot..."
+          echo "cedrus" >> /etc/modules
+          echo "=> Customization complete."
+          EOF
+          chmod +x armbian-build/userpatches/customize-image.sh
 
       - name: Compile Armbian Image
         run: |
@@ -123,7 +138,7 @@ jobs:
           INITRD_SRC=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -n 1)
           cp "$INITRD_SRC" ../boot-files/initrd
           
-          # ========== 修改点 2：提取正确的设备树（H2+ Orange Pi Zero） ==========
+          # ========== 修改点：提取正确的设备树（H2+ Orange Pi Zero） ==========
           DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
           cp "$DTB_SRC" ../boot-files/dtb
           
@@ -135,7 +150,7 @@ jobs:
       - name: Run QEMU Boot Assertion
         run: |
           echo "=> Starting QEMU emulation in background..."
-          # ========== 修改点 3：调整机器类型为 orangepi-zero ==========
+          # ========== 修改点：使用 orangepi-zero 机器类型（若失败可回退） ==========
           sudo qemu-system-arm \
             -M orangepi-zero \
             -m 1024 \
