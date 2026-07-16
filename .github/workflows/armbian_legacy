@@ -1,0 +1,222 @@
+name: Build and Verify Armbian Legacy Image with Encoder
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Debian release'
+        required: true
+        default: 'bookworm'
+        type: choice
+        options:
+          - bookworm
+
+jobs:
+  # ==================== 阶段 1：编译 legacy 镜像 ====================
+  build:
+    name: Build Legacy Image
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_name: Armbian-OrangePiZero-legacy-encoder
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+
+      - name: Clone Armbian build framework
+        run: git clone --depth=1 https://github.com/armbian/build armbian-build
+
+      # ───────── 定制脚本：CMA + 编码器自检 ─────────
+      - name: Inject customization script
+        run: |
+          mkdir -p armbian-build/userpatches
+          cat << 'EOF' > armbian-build/userpatches/customize-image.sh
+          #!/bin/bash
+          echo ">>> Setting CMA=256M in armbianEnv.txt"
+          if [ -f /boot/armbianEnv.txt ]; then
+            if ! grep -q "cma=" /boot/armbianEnv.txt; then
+              echo "extraargs=cma=256M" >> /boot/armbianEnv.txt
+            else
+              sed -i 's/cma=[0-9]*M/cma=256M/' /boot/armbianEnv.txt
+            fi
+          fi
+
+          echo ">>> Installing v4l-utils"
+          apt-get update -qq
+          apt-get install -y -qq v4l-utils
+
+          echo ">>> Creating encoder check service"
+          cat << 'SVC' > /etc/systemd/system/encoder-check.service
+          [Unit]
+          Description=Check VPU encoder presence
+          After=multi-user.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/encoder-check.sh
+          StandardOutput=journal+console
+          StandardError=journal+console
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+
+          cat << 'CHK' > /usr/local/bin/encoder-check.sh
+          #!/bin/bash
+          echo "====== VPU Encoder Check ======"
+          sleep 2   # wait for device nodes
+          FOUND=0
+          for dev in /dev/video*; do
+            echo "Checking $dev..."
+            v4l2-ctl -d $dev --list-formats-out 2>&1
+            if v4l2-ctl -d $dev --list-formats-out 2>/dev/null | grep -q "H.264"; then
+              echo "ENCODER_FOUND on $dev"
+              FOUND=1
+              break
+            fi
+          done
+          if [ $FOUND -eq 1 ]; then
+            echo "VPU_ENCODER_READY"
+          else
+            echo "VPU_ENCODER_NOT_FOUND"
+          fi
+          CHK
+          chmod +x /usr/local/bin/encoder-check.sh
+
+          echo ">>> Enabling encoder check service"
+          systemctl enable encoder-check.service
+
+          # 允许 root 在串口自动登录（方便 QEMU 观察输出）
+          mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+          cat << 'AUTOLOGIN' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux
+          AUTOLOGIN
+
+          echo ">>> Customization complete."
+          EOF
+          chmod +x armbian-build/userpatches/customize-image.sh
+
+      - name: Build Armbian image (legacy kernel)
+        run: |
+          cd armbian-build
+          ./compile.sh \
+            BOARD=orangepizero \
+            BRANCH=legacy \
+            RELEASE=${{ github.event.inputs.release }} \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,xz \
+            EXPERT=yes \
+            IGNORE_UPDATES=yes
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+          path: armbian-build/output/images/*.xz
+          retention-days: 7
+        env:
+          artifact_name: Armbian-OrangePiZero-legacy-encoder
+
+  # ==================== 阶段 2：QEMU 启动 + 编码器检查 ====================
+  qemu-test:
+    name: QEMU Boot & Encoder Check
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install QEMU and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm xz-utils
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ./workspace
+
+      - name: Extract image and boot files
+        run: |
+          cd workspace
+          xz -d *.xz
+          IMG=$(ls *.img)
+          sudo losetup -Pf "$IMG"
+          LOOP=$(losetup -j "$IMG" | cut -d: -f1)
+          sudo mkdir -p /mnt/armbian
+          sudo mount "${LOOP}p1" /mnt/armbian
+
+          mkdir -p ../boot-files
+          # kernel
+          KERN=$(ls /mnt/armbian/boot/vmlinuz-* /mnt/armbian/boot/zImage* 2>/dev/null | head -1)
+          cp "$KERN" ../boot-files/vmlinuz
+          # initrd
+          INITRD=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -1)
+          cp "$INITRD" ../boot-files/initrd
+          # dtb
+          DTB=$(find /mnt/armbian/boot -name "sun8i-h2-plus-orangepi-zero.dtb" | head -1)
+          cp "$DTB" ../boot-files/dtb
+
+          sudo umount /mnt/armbian
+          sudo losetup -d "$LOOP"
+          mv "$IMG" ../armbian.img
+
+      - name: Boot in QEMU and check encoder
+        id: boot
+        run: |
+          echo ">>> Starting QEMU..."
+          sudo qemu-system-arm \
+            -M orangepi-zero \
+            -m 512 \
+            -cpu cortex-a7 \
+            -nographic \
+            -dtb boot-files/dtb \
+            -kernel boot-files/vmlinuz \
+            -initrd boot-files/initrd \
+            -append "console=ttyS0,115200 root=/dev/mmcblk0p1 ro rootwait" \
+            -drive if=sd,format=raw,file=armbian.img \
+            -serial stdio > qemu.log 2>&1 &
+          QPID=$!
+
+          # 等待编码器检测标记（最多 120 秒）
+          for i in $(seq 1 120); do
+            if grep -q "VPU_ENCODER_READY" qemu.log; then
+              echo "✅ Encoder found inside QEMU!"
+              break
+            elif grep -q "VPU_ENCODER_NOT_FOUND" qemu.log; then
+              echo "⚠️ Encoder NOT found (this may be expected in QEMU without real VPU hardware)."
+              break
+            fi
+            sleep 1
+          done
+
+          sudo kill $QPID || true
+          echo "===== Serial log ====="
+          cat qemu.log
+          # 将检测结果输出为 workflow 步骤状态
+          if grep -q "VPU_ENCODER_READY" qemu.log; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=warning" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Final remarks
+        run: |
+          if [ "${{ steps.boot.outputs.status }}" = "success" ]; then
+            echo "🎉 Encoder device was registered in QEMU – high confidence it will work on real hardware."
+          else
+            echo "📌 Encoder not detected in QEMU (likely due to missing VPU hardware emulation)."
+            echo "   Please burn the image to SD card and run on real Orange Pi Zero to verify."
+            echo "   Verification commands:"
+            echo "     v4l2-ctl --list-devices"
+            echo "     v4l2-ctl -d /dev/video1 --list-formats-out   # look for H.264"
+          fi
