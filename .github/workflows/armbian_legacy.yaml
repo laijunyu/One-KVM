@@ -47,31 +47,29 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：覆盖交互函数 ==========
-      - name: Override interactive functions
+      # ========== 核心修复：彻底替换交互函数为 true ==========
+      - name: Patch Armbian scripts to disable interactive prompts
         run: |
           cd armbian-build
-          # 直接替换 interactive.sh 文件，将所有交互函数定义为空操作
-          cat > functions/configuration/interactive.sh <<'EOF'
-          #!/bin/bash
-          # Overridden interactive functions for CI
-          interactive_config_ask_build_only() { return 0; }
-          interactive_config_ask_kernel_configure() { return 0; }
-          interactive_config_ask_board_list() { return 0; }
-          interactive_config_ask_release() { return 0; }
-          # Add any other interactive functions that might be called
-          EOF
+          # 查找所有包含交互函数调用的脚本，将调用替换为 true
+          # 使用 -i.bak 备份，避免误操作
+          find . -type f -name "*.sh" -exec sed -i.bak \
+            -e 's/\(.*\)interactive_config_ask_build_only\(.*\)/\1true \2/g' \
+            -e 's/\(.*\)interactive_config_ask_kernel_configure\(.*\)/\1true \2/g' \
+            -e 's/\(.*\)interactive_config_ask_board_list\(.*\)/\1true \2/g' \
+            {} \;
+          # 清理备份文件（可选）
+          find . -name "*.bak" -delete
 
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
-          # 重定向标准输入以避免 stty 错误，并设置环境变量
+          # 设置环境变量，并强制以 root 运行
           sudo -E bash -c '
             export BUILD_ONLY=image
             export DIALOG=disabled
             export TERM=dumb
             export DEBIAN_FRONTEND=noninteractive
-            exec </dev/null
             ./compile.sh -y \
               BOARD=orangepizero \
               BRANCH=legacy \
