@@ -47,40 +47,34 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：彻底替换交互函数为 true ==========
-      - name: Patch Armbian scripts to disable interactive prompts
+      # ========== 使用配置文件，避免命令行参数过长 ==========
+      - name: Create Armbian config file
         run: |
           cd armbian-build
-          # 查找所有包含交互函数调用的脚本，将调用替换为 true
-          # 使用 -i.bak 备份，避免误操作
-          find . -type f -name "*.sh" -exec sed -i.bak \
-            -e 's/\(.*\)interactive_config_ask_build_only\(.*\)/\1true \2/g' \
-            -e 's/\(.*\)interactive_config_ask_kernel_configure\(.*\)/\1true \2/g' \
-            -e 's/\(.*\)interactive_config_ask_board_list\(.*\)/\1true \2/g' \
-            {} \;
-          # 清理备份文件（可选）
-          find . -name "*.bak" -delete
+          mkdir -p userpatches
+          cat << EOF > userpatches/config-default.conf
+          BOARD="orangepizero"
+          BRANCH="legacy"
+          RELEASE="${{ github.event.inputs.release }}"
+          BUILD_DESKTOP="no"
+          BUILD_MINIMAL="no"
+          KERNEL_CONFIGURE="no"
+          COMPRESS_OUTPUTIMAGE="sha,xz"
+          IGNORE_UPDATES="yes"
+          EXPERT="yes"
+          BUILD_ONLY="image"
+          EOF
 
+      # ========== 使用 script 模拟终端，彻底解决 stty 和交互问题 ==========
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
-          # 设置环境变量，并强制以 root 运行
-          sudo -E bash -c '
-            export BUILD_ONLY=image
-            export DIALOG=disabled
-            export TERM=dumb
-            export DEBIAN_FRONTEND=noninteractive
-            ./compile.sh -y \
-              BOARD=orangepizero \
-              BRANCH=legacy \
-              RELEASE=${{ github.event.inputs.release }} \
-              BUILD_DESKTOP=no \
-              BUILD_MINIMAL=no \
-              KERNEL_CONFIGURE=no \
-              COMPRESS_OUTPUTIMAGE=sha,xz \
-              IGNORE_UPDATES=yes \
-              EXPERT=yes
-          '
+          export DIALOG=disabled
+          export TERM=dumb
+          # script 会创建一个伪终端，让 stty 不再报错，同时 -e 选项会保留退出码
+          script -q -e -c "sudo -E ./compile.sh -y" build.log
+          # 打印日志以便调试
+          cat build.log
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
