@@ -10,7 +10,6 @@ on:
         type: choice
         options:
           - bookworm
-          # 可添加 bullseye, focal 等，需确保旧框架支持
 
 jobs:
   # ==================== 阶段 1：编译镜像（legacy 内核） ====================
@@ -54,7 +53,8 @@ jobs:
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
-          ./compile.sh \
+          # 添加 -y 参数自动确认，BUILD_ONLY=image 跳过额外交互
+          ./compile.sh -y \
             BOARD=orangepizero \
             BRANCH=legacy \
             RELEASE=${{ github.event.inputs.release }} \
@@ -62,8 +62,8 @@ jobs:
             BUILD_MINIMAL=no \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=sha,xz \
-            EXPERT=yes \
-            IGNORE_UPDATES=yes
+            IGNORE_UPDATES=yes \
+            BUILD_ONLY=image
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
