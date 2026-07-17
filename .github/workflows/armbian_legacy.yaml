@@ -47,19 +47,17 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：动态查找并禁用交互菜单 ==========
+      # ========== 核心修复：覆盖交互函数为空操作 ==========
       - name: Patch Armbian scripts to disable interactive prompts
         run: |
           cd armbian-build
-          # 查找所有包含 interactive_config_ask_build_only 的脚本文件，并注释掉调用行
-          for file in $(grep -rl 'interactive_config_ask_build_only' . 2>/dev/null); do
-            echo "Patching $file"
-            sed -i 's/.*interactive_config_ask_build_only.*/#&/' "$file"
-          done
-          # 强制设置 BUILD_ONLY 和环境变量
-          echo 'export BUILD_ONLY="image"' >> compile.sh
-          echo 'export DIALOG=disabled' >> compile.sh
-          echo 'export TERM=dumb' >> compile.sh
+          # 在 compile.sh 的 #!/bin/bash 之后插入交互函数覆盖定义
+          sed -i '/^#!\/bin\/bash/a\
+          # Override interactive functions for CI\n\
+          interactive_config_ask_kernel_configure() { return 0; }\n\
+          interactive_config_ask_board_list() { return 0; }\n\
+          interactive_config_ask_build_only() { return 0; }\n\
+          interactive_config_ask_kernel_configure() { return 0; }' compile.sh
 
       - name: Compile Armbian Image (legacy kernel)
         run: |
