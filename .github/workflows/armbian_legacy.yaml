@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev
+            libncurses-dev libssl-dev expect
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -41,29 +41,48 @@ jobs:
           sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
           sudo apt-get autoremove -y
 
-      # 关键：使用支持 legacy 内核的旧版构建框架
       - name: Clone Armbian Build Framework (v23.02)
         run: |
           git clone https://github.com/armbian/build armbian-build
           cd armbian-build
           git checkout v23.02
 
-      # legacy 内核已内置 cedrus 编码支持，无需额外补丁
-
-      - name: Compile Armbian Image (legacy kernel)
+      # ========== 关键：使用 expect 脚本自动化交互 ==========
+      - name: Compile Armbian Image (legacy kernel) with expect
         run: |
           cd armbian-build
-          # 添加 -y 参数自动确认，BUILD_ONLY=image 跳过额外交互
-          ./compile.sh -y \
+          cat << 'EXPECT_EOF' > /tmp/armbian-build.exp
+          #!/usr/bin/expect -f
+          set timeout 3600
+          spawn ./compile.sh \
             BOARD=orangepizero \
             BRANCH=legacy \
-            RELEASE=${{ github.event.inputs.release }} \
+            RELEASE=$env(RELEASE) \
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=no \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=sha,xz \
             IGNORE_UPDATES=yes \
-            BUILD_ONLY=image
+            EXPERT=yes
+          
+          expect {
+            # 匹配“Do you want to ...?”之类的交互提示，自动按回车选择默认
+            "Do you want to" { send "\r"; exp_continue }
+            "Select" { send "\r"; exp_continue }
+            "Choose" { send "\r"; exp_continue }
+            "No option selected" { send "\r"; exp_continue }
+            # 如果出现“Build only”相关提示，选择“image”或“yes”
+            "build only" { send "image\r"; exp_continue }
+            "image" { send "image\r"; exp_continue }
+            timeout { send_user "Timeout waiting for prompt\n"; exit 1 }
+            eof
+          }
+          wait
+          EXPECT_EOF
+          chmod +x /tmp/armbian-build.exp
+          
+          export RELEASE=${{ github.event.inputs.release }}
+          /tmp/armbian-build.exp
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
@@ -100,21 +119,17 @@ jobs:
           LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
           
           sudo mkdir -p /mnt/armbian
-          # 第一分区为 boot 分区（legacy 镜像结构）
           sudo mount "${LOOP_DEV}p1" /mnt/armbian
           
           echo "=> Copying kernel, initrd and DTB for QEMU..."
           mkdir -p ../boot-files
           
-          # 兼容多种内核命名（uImage / vmlinuz / zImage）
           KERNEL_SRC=$(ls /mnt/armbian/boot/{uImage,vmlinuz,zImage}* 2>/dev/null | head -n 1)
           cp "$KERNEL_SRC" ../boot-files/kernel
           
-          # Initrd 可能为 uInitrd 或 initrd.img-*
           INITRD_SRC=$(ls /mnt/armbian/boot/{uInitrd,initrd.img-*}* 2>/dev/null | head -n 1)
           cp "$INITRD_SRC" ../boot-files/initrd
           
-          # 提取设备树（橘皮 zero 专用）
           DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
           cp "$DTB_SRC" ../boot-files/dtb
           
@@ -138,7 +153,7 @@ jobs:
             -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
           
           QEMU_PID=$!
-          TIMEOUT=240   # 旧内核启动稍慢，增加等待时间
+          TIMEOUT=240
           BOOT_SUCCESS=false
           echo "=> Waiting for system to reach login prompt (Timeout: ${TIMEOUT}s)..."
           
