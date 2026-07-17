@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect
+            libncurses-dev libssl-dev
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -47,42 +47,25 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 关键：使用 expect 脚本自动化交互 ==========
-      - name: Compile Armbian Image (legacy kernel) with expect
+      # ========== 核心修复：使用管道 + 环境变量，强制非交互 ==========
+      - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
-          cat << 'EXPECT_EOF' > /tmp/armbian-build.exp
-          #!/usr/bin/expect -f
-          set timeout 3600
-          spawn ./compile.sh \
+          export TERM=linux
+          export DIALOG=disabled
+          export DEBIAN_FRONTEND=noninteractive
+          # 管道输入 "image" 以应答交互菜单，同时使用 -y 自动确认警告
+          printf "image\n" | sudo -E ./compile.sh -y \
             BOARD=orangepizero \
             BRANCH=legacy \
-            RELEASE=$env(RELEASE) \
+            RELEASE=${{ github.event.inputs.release }} \
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=no \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=sha,xz \
             IGNORE_UPDATES=yes \
-            EXPERT=yes
-          
-          expect {
-            # 匹配“Do you want to ...?”之类的交互提示，自动按回车选择默认
-            "Do you want to" { send "\r"; exp_continue }
-            "Select" { send "\r"; exp_continue }
-            "Choose" { send "\r"; exp_continue }
-            "No option selected" { send "\r"; exp_continue }
-            # 如果出现“Build only”相关提示，选择“image”或“yes”
-            "build only" { send "image\r"; exp_continue }
-            "image" { send "image\r"; exp_continue }
-            timeout { send_user "Timeout waiting for prompt\n"; exit 1 }
-            eof
-          }
-          wait
-          EXPECT_EOF
-          chmod +x /tmp/armbian-build.exp
-          
-          export RELEASE=${{ github.event.inputs.release }}
-          /tmp/armbian-build.exp
+            EXPERT=yes \
+            BUILD_ONLY=image
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
