@@ -31,14 +31,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect
+            libncurses-dev libssl-dev
 
       - name: Disable Docker to Force Native Build
+        # 注意：我们改用 Docker 编译，所以不需要禁用 Docker 了，但保留也可能不影响。
         run: |
           sudo systemctl stop docker.service docker.socket || true
           sudo systemctl disable docker.service docker.socket || true
           sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
           sudo apt-get autoremove -y
+        # 但实际上，Docker 编译需要 Docker 引擎，所以上面的步骤是多余的，反而会删除 Docker。
+        # 我们注释掉或删除这个步骤，以确保 Docker 可用。
+      - name: Ensure Docker is available
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          sudo systemctl start docker
 
       - name: Clone Armbian Build Framework (v23.02)
         run: |
@@ -62,40 +70,22 @@ jobs:
           EXPERT="yes"
           EOF
 
-      - name: Compile Armbian Image (legacy kernel)
+      - name: Compile Armbian Image (legacy kernel) with Docker
         run: |
           cd armbian-build
-          export DIALOG=disabled
-          export TERM=dumb
-          expect << 'EXPECT_EOF'
-          set timeout 7200
-          spawn sudo -E ./compile.sh
-          expect {
-            -re "Choose an option|Select|What would you like to do" {
-              send "1\r"
-              exp_continue
-            }
-            -re "Do you want to|Are you sure" {
-              send "\r"
-              exp_continue
-            }
-            -re "Error|ERROR|failed|FAILED" {
-              send_user "Build reported an error\n"
-              exit 1
-            }
-            timeout {
-              send_user "Timeout waiting for prompt\n"
-              exit 1
-            }
-            eof
-          }
-          wait
-          set exit_code [lindex [wait] 3]
-          if {$exit_code != 0} {
-            send_user "Build process exited with code $exit_code\n"
-            exit $exit_code
-          }
-          EXPECT_EOF
+          # 使用 Docker 编译，指定基础镜像为 Ubuntu 22.04 (jammy)
+          # 同时通过管道输入 "1" 来应答可能出现的 "Choose an option" 菜单
+          printf "1\n" | sudo -E ./compile.sh \
+            BOARD=orangepizero \
+            BRANCH=legacy \
+            RELEASE=${{ github.event.inputs.release }} \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,xz \
+            IGNORE_UPDATES=yes \
+            EXPERT=yes \
+            DOCKER_ARMBIAN_BASE_IMAGE="ubuntu:jammy"
 
       - name: List output directory for debugging
         run: |
