@@ -10,50 +10,167 @@ on:
         type: choice
         options:
           - bookworm
-          # 可添加其他发行版，如 jammy, focal
 
 jobs:
   build:
     name: Build Legacy Image
-    runs-on: ubuntu-22.04                # 官方支持的系统版本
+    runs-on: ubuntu-22.04   # 使用 Ubuntu 22.04 以避免 24.04 的兼容性问题
+    outputs:
+      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-legacy-DynamicIP
     steps:
-      - name: Checkout Armbian build scripts
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          repository: armbian/build      # 直接从 armbian/build 仓库拉取
-          ref: main                      # 使用主分支（也可改为稳定版 tag）
-          path: armbian-build            # 存放到该目录
 
-      - name: Install required packages
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bc binfmt-support bison build-essential ccache \
-            debian-archive-keyring debootstrap device-tree-compiler \
-            dosfstools flex gawk gcc-arm-linux-gnueabihf \
-            gcc-aarch64-linux-gnu git gnupg gpg gpg-agent \
-            libc6-dev-i386 libssl-dev libusb-1.0-0-dev linux-base \
-            locales ncurses-dev parted pv qemu-user-static rsync \
-            swig u-boot-tools uuid-dev zlib1g-dev
+          sudo apt-get install -y qemu-user-static binfmt-support \
+            gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
+            libncurses-dev libssl-dev
 
-      - name: Build Armbian image
+      - name: Disable Docker to Force Native Build
+        run: |
+          sudo systemctl stop docker.service docker.socket || true
+          sudo systemctl disable docker.service docker.socket || true
+          sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
+          sudo apt-get autoremove -y
+
+      # ========== 关键：使用旧版 Armbian 构建框架 (v23.02) ==========
+      - name: Clone Armbian Build Framework (v23.02)
+        run: |
+          git clone https://github.com/armbian/build armbian-build
+          cd armbian-build
+          git checkout v23.02
+
+      - name: Create Armbian config file
         run: |
           cd armbian-build
-          ./compile.sh \
-            BOARD=orangepizero \
-            BRANCH=legacy \
-            RELEASE=${{ github.event.inputs.release }} \
-            BUILD_MINIMAL=no \
-            BUILD_DESKTOP=no \
-            KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,xz \
-            IGNORE_UPDATES=yes \
-            EXPERT=yes
+          mkdir -p userpatches
+          cat << EOF > userpatches/config-default.conf
+          BOARD="orangepizero"
+          BRANCH="legacy"
+          RELEASE="${{ github.event.inputs.release }}"
+          BUILD_DESKTOP="no"
+          BUILD_MINIMAL="no"
+          KERNEL_CONFIGURE="no"
+          COMPRESS_OUTPUTIMAGE="sha,xz"
+          IGNORE_UPDATES="yes"
+          EXPERT="yes"
+          EOF
 
-      - name: Upload output image
+      # ========== 使用 script 模拟终端，自动应答交互 ==========
+      - name: Compile Armbian Image (legacy kernel)
+        run: |
+          cd armbian-build
+          export DIALOG=disabled
+          export TERM=dumb
+          # script 会创建一个伪终端，解决 stty 问题，并用 -e 保留退出码
+          script -q -e -c "sudo -E ./compile.sh -y" build.log
+          # 打印日志以便调试
+          cat build.log
+
+      - name: List output directory for debugging
+        run: |
+          echo "=== Contents of armbian-build/output/ ==="
+          ls -la armbian-build/output/ || echo "Directory does not exist"
+          echo "=== Contents of armbian-build/output/images/ ==="
+          ls -la armbian-build/output/images/ || echo "Directory does not exist"
+          echo "=== End of list ==="
+
+      - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
-          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-legacy
-          path: armbian-build/output/images/*.xz
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: armbian-build/output/images/*
           retention-days: 7
           if-no-files-found: error
+
+  boot-test:
+    name: QEMU Boot Test
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install QEMU & Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm xz-utils
+
+      - name: Download Artifact Image
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ./workspace
+
+      - name: Extract Boot Files from Image
+        run: |
+          cd ./workspace
+          echo "=> Uncompressing Image..."
+          xz -d *.xz
+          IMAGE_FILE=$(ls *.img | head -n 1)
+          
+          echo "=> Mounting image via loop device..."
+          LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
+          
+          sudo mkdir -p /mnt/armbian
+          sudo mount "${LOOP_DEV}p1" /mnt/armbian
+          
+          echo "=> Copying kernel, initrd and DTB for QEMU..."
+          mkdir -p ../boot-files
+          
+          KERNEL_SRC=$(ls /mnt/armbian/boot/{uImage,vmlinuz,zImage}* 2>/dev/null | head -n 1)
+          cp "$KERNEL_SRC" ../boot-files/kernel
+          
+          INITRD_SRC=$(ls /mnt/armbian/boot/{uInitrd,initrd.img-*}* 2>/dev/null | head -n 1)
+          cp "$INITRD_SRC" ../boot-files/initrd
+          
+          DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
+          cp "$DTB_SRC" ../boot-files/dtb
+          
+          echo "=> Cleaning up mounts..."
+          sudo umount /mnt/armbian
+          sudo losetup -d "$LOOP_DEV"
+          mv "$IMAGE_FILE" ../armbian.img
+
+      - name: Run QEMU Boot Assertion
+        run: |
+          echo "=> Starting QEMU emulation in background..."
+          sudo qemu-system-arm \
+            -M orangepi-zero \
+            -m 1024 \
+            -cpu cortex-a7 \
+            -nographic \
+            -dtb boot-files/dtb \
+            -kernel boot-files/kernel \
+            -initrd boot-files/initrd \
+            -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 rw rootwait' \
+            -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
+          
+          QEMU_PID=$!
+          TIMEOUT=240
+          BOOT_SUCCESS=false
+          echo "=> Waiting for system to reach login prompt (Timeout: ${TIMEOUT}s)..."
+          
+          for i in $(seq 1 $TIMEOUT); do
+            if grep -E "login:|Reached target Multi-User System|Armbian" qemu_serial.log > /dev/null; then
+              echo "✅ [SUCCESS] 镜像成功启动并进入控制台！"
+              BOOT_SUCCESS=true
+              break
+            fi
+            sleep 1
+          done
+          
+          sudo kill $QEMU_PID || true
+          
+          echo "=================== QEMU 串口完整日志 ==================="
+          cat qemu_serial.log
+          echo "========================================================"
+          
+          if [ "$BOOT_SUCCESS" = false ]; then
+            echo "❌ [FAILURE] 镜像未能成功引导或在超时时间内未到达登录界面。"
+            exit 1
+          fi
