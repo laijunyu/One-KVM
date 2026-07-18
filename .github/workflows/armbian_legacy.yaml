@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev
+            libncurses-dev libssl-dev expect
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -47,6 +47,7 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
+      # ========== 使用配置文件传递所有参数，避免交互 ==========
       - name: Create Armbian config file
         run: |
           cd armbian-build
@@ -63,13 +64,32 @@ jobs:
           EXPERT="yes"
           EOF
 
+      # ========== 使用 expect 自动化交互菜单 ==========
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
           export DIALOG=disabled
           export TERM=dumb
-          script -q -e -c "sudo -E ./compile.sh -y" build.log
-          cat build.log
+          expect << 'EXPECT_EOF'
+          set timeout 7200
+          spawn sudo -E ./compile.sh -y
+          expect {
+            -re "Choose an option|Select|What would you like to do" {
+              send "1\r"
+              exp_continue
+            }
+            -re "Do you want to|Are you sure" {
+              send "\r"
+              exp_continue
+            }
+            timeout {
+              send_user "Timeout waiting for prompt\n"
+              exit 1
+            }
+            eof
+          }
+          wait
+          EXPECT_EOF
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
