@@ -70,11 +70,10 @@ jobs:
           EXPERT="yes"
           EOF
 
-      - name: Compile Armbian Image (legacy kernel) with Docker
+      - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
           # 使用 Docker 编译，指定基础镜像为 Ubuntu 22.04 (jammy)
-          # 同时通过管道输入 "1" 来应答可能出现的 "Choose an option" 菜单
           printf "1\n" | sudo -E ./compile.sh \
             BOARD=orangepizero \
             BRANCH=legacy \
@@ -85,7 +84,8 @@ jobs:
             COMPRESS_OUTPUTIMAGE=sha,xz \
             IGNORE_UPDATES=yes \
             EXPERT=yes \
-            DOCKER_ARMBIAN_BASE_IMAGE="ubuntu:jammy"
+            DOCKER_ARMBIAN_BASE_IMAGE="ubuntu:jammy" \
+            BUILD_ONLY="u-boot,kernel,armbian-config,armbian-zsh,plymouth-theme-armbian,armbian-firmware,armbian-bsp,chroot,bootstrap"
 
       - name: List output directory for debugging
         run: |
