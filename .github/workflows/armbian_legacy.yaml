@@ -12,7 +12,6 @@ on:
           - bookworm
 
 jobs:
-  # ==================== 阶段 1：编译镜像（legacy 内核） ====================
   build:
     name: Build Legacy Image
     runs-on: ubuntu-24.04
@@ -47,7 +46,6 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 使用配置文件传递所有参数，避免交互 ==========
       - name: Create Armbian config file
         run: |
           cd armbian-build
@@ -64,7 +62,6 @@ jobs:
           EXPERT="yes"
           EOF
 
-      # ========== 使用 expect 自动化交互菜单 ==========
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
@@ -72,7 +69,7 @@ jobs:
           export TERM=dumb
           expect << 'EXPECT_EOF'
           set timeout 7200
-          spawn sudo -E ./compile.sh -y
+          spawn sudo -E ./compile.sh
           expect {
             -re "Choose an option|Select|What would you like to do" {
               send "1\r"
@@ -82,6 +79,10 @@ jobs:
               send "\r"
               exp_continue
             }
+            -re "Error|ERROR|failed|FAILED" {
+              send_user "Build reported an error\n"
+              exit 1
+            }
             timeout {
               send_user "Timeout waiting for prompt\n"
               exit 1
@@ -89,16 +90,29 @@ jobs:
             eof
           }
           wait
+          set exit_code [lindex [wait] 3]
+          if {$exit_code != 0} {
+            send_user "Build process exited with code $exit_code\n"
+            exit $exit_code
+          }
           EXPECT_EOF
+
+      - name: List output directory for debugging
+        run: |
+          echo "=== Contents of armbian-build/output/ ==="
+          ls -la armbian-build/output/ || echo "Directory does not exist"
+          echo "=== Contents of armbian-build/output/images/ ==="
+          ls -la armbian-build/output/images/ || echo "Directory does not exist"
+          echo "=== End of list ==="
 
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
-          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-legacy-DynamicIP
-          path: armbian-build/output/images/*.xz
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: armbian-build/output/images/*
           retention-days: 7
+          if-no-files-found: error
 
-  # ==================== 阶段 2：QEMU 启动测试 ====================
   boot-test:
     name: QEMU Boot Test
     needs: build
