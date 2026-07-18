@@ -15,7 +15,7 @@ on:
 jobs:
   build:
     name: Build Legacy Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04          # ← 从 ubuntu-latest 改为 ubuntu-22.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
