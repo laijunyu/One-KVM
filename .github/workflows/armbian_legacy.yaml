@@ -15,46 +15,45 @@ on:
 jobs:
   build:
     name: Build Legacy Image
-    runs-on: ubuntu-22.04   # 仍使用官方支持的宿主机版本，但实际构建在容器内进行
+    runs-on: ubuntu-22.04                # 官方支持的系统版本
     steps:
-      - name: Checkout Code (optional)
+      - name: Checkout Armbian build scripts
         uses: actions/checkout@v4
-        # 注意：Armbian 构建脚本会自动从官方仓库拉取源码，此步仅为保存一些自定义补丁（如果你有）
+        with:
+          repository: armbian/build      # 直接从 armbian/build 仓库拉取
+          ref: main                      # 使用主分支（也可改为稳定版 tag）
+          path: armbian-build            # 存放到该目录
 
-      - name: Build Armbian Image in Docker
+      - name: Install required packages
         run: |
-          # 创建输出目录（用于挂载，以便获取产物）
-          mkdir -p ./output
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc binfmt-support bison build-essential ccache \
+            debian-archive-keyring debootstrap device-tree-compiler \
+            dosfstools flex gawk gcc-arm-linux-gnueabihf \
+            gcc-aarch64-linux-gnu git gnupg gpg gpg-agent \
+            libc6-dev-i386 libssl-dev libusb-1.0-0-dev linux-base \
+            locales ncurses-dev parted pv qemu-user-static rsync \
+            swig u-boot-tools uuid-dev zlib1g-dev
 
-          # 运行 Armbian 官方 Docker 镜像，执行编译命令
-          docker run --rm \
-            -v $(pwd)/output:/output \
-            -e BOARD=orangepizero \
-            -e BRANCH=legacy \
-            -e RELEASE=${{ github.event.inputs.release }} \
-            -e BUILD_MINIMAL=no \
-            -e BUILD_DESKTOP=no \
-            -e KERNEL_CONFIGURE=no \
-            -e COMPRESS_OUTPUTIMAGE=sha,xz \
-            -e IGNORE_UPDATES=yes \
-            -e EXPERT=yes \
-            armbian/build:latest \
-            ./compile.sh \
-              BOARD=orangepizero \
-              BRANCH=legacy \
-              RELEASE=${{ github.event.inputs.release }} \
-              BUILD_MINIMAL=no \
-              BUILD_DESKTOP=no \
-              KERNEL_CONFIGURE=no \
-              COMPRESS_OUTPUTIMAGE=sha,xz \
-              IGNORE_UPDATES=yes \
-              EXPERT=yes \
-              OUTPUTDIR=/output
+      - name: Build Armbian image
+        run: |
+          cd armbian-build
+          ./compile.sh \
+            BOARD=orangepizero \
+            BRANCH=legacy \
+            RELEASE=${{ github.event.inputs.release }} \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,xz \
+            IGNORE_UPDATES=yes \
+            EXPERT=yes
 
-      - name: Upload Output Image
+      - name: Upload output image
         uses: actions/upload-artifact@v4
         with:
           name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-legacy
-          path: output/*.xz          # 因为输出目录挂载到 /output，产物直接在这里
+          path: armbian-build/output/images/*.xz
           retention-days: 7
           if-no-files-found: error
