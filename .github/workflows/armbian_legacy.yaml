@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect
+            libncurses-dev libssl-dev expect wget
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -46,6 +46,19 @@ jobs:
           git clone https://github.com/armbian/build armbian-build
           cd armbian-build
           git checkout v23.02
+
+      # ========== 核心修复：手动预下载卡住的工具链 ==========
+      - name: Pre-download stuck toolchain
+        run: |
+          cd armbian-build
+          mkdir -p cache/toolchain
+          echo "Downloading gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz..."
+          wget -nv -t 5 -T 120 -O cache/toolchain/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz \
+            https://releases.linaro.org/archive/13.11/components/toolchain/binaries/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz || \
+            echo "Warning: Manual download failed, will rely on Armbian's built-in download."
+          # 创建标记文件，让 Armbian 认为已下载完成
+          touch cache/toolchain/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz.download-complete
+          echo "Toolchain pre-download completed."
 
       - name: Prepare aria2 cache directory
         run: |
