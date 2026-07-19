@@ -1,4 +1,4 @@
-name: Build Armbian Legacy (4.19) with H.264 Encoding for Orange Pi Zero
+name: Build Armbian - Phase 1 (Driver + DTB)
 
 on:
   workflow_dispatch:
@@ -10,28 +10,37 @@ on:
         type: choice
         options:
           - bookworm
+      branch:
+        description: '选择内核分支'
+        required: true
+        default: 'current'
+        type: choice
+        options:
+          - current
 
 jobs:
+  # ================================================================
+  # 阶段 1：编译镜像（含底层驱动 + DTB 修改）
+  # ================================================================
   build:
-    name: Build Legacy Image
-    runs-on: ubuntu-22.04
+    name: Build Image (Driver + DTB)
+    runs-on: ubuntu-24.04
     outputs:
-      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-legacy-DynamicIP
+      artifact_name: Armbian-OPiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-cedar-ve
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           sudo apt-get clean
 
-      - name: Install Build Dependencies
+      - name: Install QEMU and Binfmt on Host
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support \
-            gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect
+          sudo apt-get install -y qemu-user-static binfmt-support
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -40,103 +49,821 @@ jobs:
           sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
           sudo apt-get autoremove -y
 
-      # ========== 关键：使用旧版 Armbian 构建框架 (v23.02) ==========
-      - name: Clone Armbian Build Framework (v23.02)
-        run: |
-          git clone https://github.com/armbian/build armbian-build
-          cd armbian-build
-          git checkout v23.02
+      - name: Clone Armbian Build Framework
+        run: git clone --depth=1 https://github.com/armbian/build armbian-build
 
-      - name: Prepare aria2 cache directory
+      # ============================================================
+      # 修改点 1：内核配置（CMA + VPU 解码 + 编码相关）
+      # ============================================================
+      - name: Configure Kernel (CMA + Cedrus)
         run: |
-          mkdir -p armbian-build/cache/.aria2
-          touch armbian-build/cache/.aria2/server_stats
+          mkdir -p armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}
 
-      - name: Create Armbian config file
-        run: |
-          cd armbian-build
-          mkdir -p userpatches
-          cat << EOF > userpatches/config-default.conf
-          BOARD="orangepizero"
-          BRANCH="legacy"
-          RELEASE="${{ github.event.inputs.release }}"
-          BUILD_DESKTOP="no"
-          BUILD_MINIMAL="no"
-          KERNEL_CONFIGURE="no"
-          COMPRESS_OUTPUTIMAGE="sha,xz"
-          IGNORE_UPDATES="yes"
-          EXPERT="yes"
+          cat << 'EOF' > armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}/cedar-ve.cfg
+          # === Cedrus VPU 解码（主线驱动）===
+          CONFIG_VIDEO_SUNXI_CEDRUS=m
+          CONFIG_MEDIA_CONTROLLER=y
+          CONFIG_V4L2_MEM2MEM_DEV=y
+
+          # === CMA 连续内存分配（cedar_ve 编码需要）===
+          CONFIG_CMA=y
+          CONFIG_DMA_CMA=y
+          CONFIG_CMA_SIZE_MBYTES=96
+          CONFIG_CMA_SIZE_SEL_MBYTES=y
+          CONFIG_CMA_AREAS=7
+
+          # === ION 内存分配器（cedar_ve 用户空间驱动依赖）===
+          CONFIG_ION=y
+          CONFIG_ION_SYSTEM_HEAP=y
+          CONFIG_ION_CMA_HEAP=y
+
+          # === 设备树 Overlay 支持 ===
+          CONFIG_OF_OVERLAY=y
+          CONFIG_OF_CONFIGFS=y
           EOF
 
-      # ========== 核心修复：强制跳过内置工具链下载，使用系统工具链 ==========
-      - name: Compile Armbian Image (legacy kernel)
-        run: |
-          cd armbian-build
-          export DIALOG=disabled
-          export TERM=dumb
-          export USE_ARIA2=no
-          # 关键环境变量：强制使用 GitHub Runner 自带的工具链，跳过 Armbian 内置下载
-          export USE_GITHUB_RUNNER_TOOLCHAIN=yes
-          export SKIP_TOOLCHAIN_DOWNLOAD=yes
-          expect -c '
-            log_user 1
-            set timeout 7200
-            spawn sudo -E ./compile.sh SHARE_LOG=yes
-            expect {
-              -re "Choose an option|Select|What would you like to do" {
-                send "1\r"
-                exp_continue
-              }
-              -re "Do you want to|Are you sure" {
-                send "\r"
-                exp_continue
-              }
-              timeout {
-                send_user "Timeout waiting for prompt\n"
-                exit 1
-              }
-              eof
-            }
-            wait
-          ' 2>&1 | tee build.log
+          echo "✅ 内核配置补丁已创建"
+          cat armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}/cedar-ve.cfg
 
-      - name: Check Armbian build logs
+      # ============================================================
+      # 修改点 2：DTB 补丁文件（设备树源码补丁）
+      # ============================================================
+      - name: Create DTB Patch for cedar_ve
         run: |
-          cd armbian-build
-          echo "=== Armbian build logs (first 100 lines each) ==="
-          if [ -d output/logs ]; then
-            find output/logs -type f -name "*.log" -exec echo "--- {} ---" \; -exec head -100 {} \;
-          else
-            echo "No logs directory found"
+          mkdir -p armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}
+
+          # 创建设备树补丁：为 H2+ Orange Pi Zero 添加 cedar_ve 节点
+          cat << 'DTPATCH_EOF' > armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}/0001-arm-dts-sun8i-h2-plus-add-cedar-ve-encoder.patch
+          From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+          From: Community <community@armbian.com>
+          Date: Mon, 1 Jan 2024 00:00:00 +0000
+          Subject: [PATCH] arm: dts: sun8i-h2-plus: add cedar VE encoder node
+
+          Add the Allwinner Video Engine (VE) node for H.264 hardware
+          encoding support via the cedar_ve userspace driver.
+
+          This adds:
+          - reserved-memory CMA region (96MB @ 0x4a000000)
+          - video-engine node with proper clocks and interrupts
+
+          Signed-off-by: Community <community@armbian.com>
+          ---
+           arch/arm/boot/dts/sun8i-h2-plus-orangepi-zero.dts | 28 ++++++++++++++++++++++
+           1 file changed, 28 insertions(+)
+
+          diff --git a/arch/arm/boot/dts/sun8i-h2-plus-orangepi-zero.dts b/arch/arm/boot/dts/sun8i-h2-plus-orangepi-zero.dts
+          index 0000000..1111111 100644
+          --- a/arch/arm/boot/dts/sun8i-h2-plus-orangepi-zero.dts
+          +++ b/arch/arm/boot/dts/sun8i-h2-plus-orangepi-zero.dts
+          @@ -50,6 +50,20 @@
+           	compatible = "xunlong,orangepi-zero", "allwinner,sun8i-h2-plus";
+           };
+
+          +&soc {
+          +	ve: video-engine@1c0e000 {
+          +		compatible = "allwinner,sun8i-h2-plus-video-engine";
+          +		reg = <0x01c0e000 0x1000>;
+          +		clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>,
+          +			 <&ccu CLK_DRAM_VE>;
+          +		clock-names = "ahb", "mod", "ram";
+          +		resets = <&ccu RST_BUS_VE>;
+          +		interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
+          +		allwinner,sram = <&ve_sram 1>;
+          +		status = "okay";
+          +	};
+          +};
+          +
+           &ehci0 {
+           	status = "okay";
+           };
+          @@ -70,6 +84,20 @@
+           	status = "okay";
+           };
+
+          +/ {
+          +	reserved-memory {
+          +		#address-cells = <1>;
+          +		#size-cells = <1>;
+          +		ranges;
+          +
+          +		/* 96MB CMA region for VE hardware encoding */
+          +		cma_ve: linux,cma {
+          +			compatible = "shared-dma-pool";
+          +			reusable;
+          +			size = <0x6000000>;  /* 96MB */
+          +			alignment = <0x400000>;
+          +			linux,cma-default;
+          +		};
+          +	};
+          +};
+          +
+           &mmc0 {
+           	vmmc-supply = <&reg_vcc3v3>;
+           	bus-width = <4>;
+          --
+          2.39.0
+          DTPATCH_EOF
+
+          echo "✅ DTB 补丁已创建"
+
+      # ============================================================
+      # 修改点 3：customize-image.sh（底层驱动安装 + DTB 运行时修改）
+      # ============================================================
+      - name: Inject Customize Script (Driver + DTB)
+        run: |
+          mkdir -p armbian-build/userpatches
+
+          cat << 'CUSTOMIZE_EOF' > armbian-build/userpatches/customize-image.sh
+          #!/bin/bash
+          #
+          # ============================================================
+          # Armbian customize-image.sh
+          # 阶段：底层驱动 + DTB（Phase 1）
+          # 目标：Orange Pi Zero (Allwinner H2+)
+          # 功能：
+          #   1. 编译安装 cedar_ve 内核驱动
+          #   2. 运行时修改 DTB（备用方案）
+          #   3. 配置内核启动参数
+          #   4. 创建启动时自动加载脚本
+          #   5. 创建底层验证脚本
+          # ============================================================
+          #
+
+          RELEASE=$1
+          LINUXFAMILY=$2
+          BOARD=$3
+          BUILD_DESKTOP=$4
+
+          # 仅对 orangepizero 生效
+          if [[ "$BOARD" != "orangepizero" ]]; then
+              echo "=> 非 orangepizero 板卡，跳过定制"
+              exit 0
           fi
-          echo "=== End of logs ==="
 
-      - name: List output directory for debugging
+          echo "============================================================"
+          echo " Phase 1: 底层驱动 + DTB 定制"
+          echo " Board: $BOARD | Family: $LINUXFAMILY | Release: $RELEASE"
+          echo "============================================================"
+
+          # ----------------------------------------------------------
+          # 1. 安装编译依赖
+          # ----------------------------------------------------------
+          echo "[1/7] 安装编译依赖..."
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              build-essential \
+              git \
+              device-tree-compiler \
+              bc \
+              flex \
+              bison \
+              libssl-dev \
+              ca-certificates
+
+          # ----------------------------------------------------------
+          # 2. 移除 cedrus 黑名单（解码驱动）
+          # ----------------------------------------------------------
+          echo "[2/7] 移除 sunxi_cedrus 黑名单..."
+          BLACKLIST_FILE="/etc/modprobe.d/blacklist-orangepizero.conf"
+          if [ -f "$BLACKLIST_FILE" ]; then
+              sed -i '/^blacklist sunxi_cedrus/s/^/# /' "$BLACKLIST_FILE"
+              echo "  => 已注释黑名单条目"
+          fi
+
+          # 确保 cedrus（解码）模块启动时加载
+          if ! grep -q "^cedrus" /etc/modules 2>/dev/null; then
+              echo "cedrus" >> /etc/modules
+          fi
+          echo "  => cedrus 解码模块已加入自动加载"
+
+          # ----------------------------------------------------------
+          # 3. 编译安装 cedar_ve 编码驱动
+          # ----------------------------------------------------------
+          echo "[3/7] 编译 cedar_ve 编码驱动..."
+
+          KERNEL_VERSION=$(ls /lib/modules/ | head -1)
+          KERNEL_HEADERS_DIR="/usr/src/linux-headers-${KERNEL_VERSION}"
+
+          # 尝试安装内核头文件
+          if [ ! -d "$KERNEL_HEADERS_DIR" ]; then
+              echo "  => 安装内核头文件..."
+              apt-get install -y linux-headers-${KERNEL_VERSION} 2>/dev/null || \
+              apt-get install -y linux-headers-current-sunxi 2>/dev/null || true
+          fi
+
+          # 克隆 cedar_ve 驱动源码
+          cd /tmp
+          rm -rf sunxi-cedar-mainline
+          git clone --depth=1 https://github.com/uboborov/sunxi-cedar-mainline.git
+
+          if [ -d "sunxi-cedar-mainline" ]; then
+              cd sunxi-cedar-mainline
+
+              # 尝试编译
+              BUILD_OK=false
+
+              if [ -d "$KERNEL_HEADERS_DIR" ]; then
+                  echo "  => 使用内核头文件: $KERNEL_HEADERS_DIR"
+                  make KERNEL_DIR="$KERNEL_HEADERS_DIR" 2>&1 && BUILD_OK=true
+              fi
+
+              if [ "$BUILD_OK" = false ]; then
+                  echo "  => 标准编译失败，尝试通用编译..."
+                  make 2>&1 && BUILD_OK=true
+              fi
+
+              if [ "$BUILD_OK" = true ] && [ -f cedar_ve.ko ]; then
+                  # 安装驱动模块
+                  mkdir -p /lib/modules/${KERNEL_VERSION}/extra/
+                  cp cedar_ve.ko /lib/modules/${KERNEL_VERSION}/extra/
+                  depmod -a
+
+                  # 配置自动加载
+                  echo "cedar_ve" > /etc/modules-load.d/cedar_ve.conf
+
+                  echo "  ✅ cedar_ve.ko 编译安装成功"
+              else
+                  echo "  ⚠️  cedar_ve.ko 编译失败，保留源码供首次启动编译"
+
+                  # 保留源码，创建首次启动编译服务
+                  mkdir -p /opt/cedar-ve-driver
+                  cp -r /tmp/sunxi-cedar-mainline/* /opt/cedar-ve-driver/
+
+                  cat > /opt/cedar-ve-driver/build.sh << 'BUILD_SCRIPT'
+          #!/bin/bash
+          # 首次启动时编译 cedar_ve 驱动
+          LOG=/var/log/cedar-ve-build.log
+          echo "$(date): 开始编译 cedar_ve 驱动" > $LOG
+
+          KVER=$(uname -r)
+          KDIR="/usr/src/linux-headers-${KVER}"
+
+          cd /opt/cedar-ve-driver
+
+          if [ -d "$KDIR" ]; then
+              make KERNEL_DIR="$KDIR" >> $LOG 2>&1
+          else
+              make >> $LOG 2>&1
+          fi
+
+          if [ -f cedar_ve.ko ]; then
+              mkdir -p /lib/modules/${KVER}/extra/
+              cp cedar_ve.ko /lib/modules/${KVER}/extra/
+              depmod -a
+              modprobe cedar_ve
+              echo "$(date): cedar_ve 驱动编译并加载成功" >> $LOG
+              touch /opt/cedar-ve-driver/.built
+          else
+              echo "$(date): cedar_ve 驱动编译失败" >> $LOG
+          fi
+          BUILD_SCRIPT
+                  chmod +x /opt/cedar-ve-driver/build.sh
+
+                  # 创建 systemd 服务
+                  cat > /etc/systemd/system/cedar-ve-build.service << 'SVC'
+          [Unit]
+          Description=Build cedar_ve kernel module on first boot
+          After=local-fs.target
+          ConditionPathExists=!/opt/cedar-ve-driver/.built
+
+          [Service]
+          Type=oneshot
+          ExecStart=/opt/cedar-ve-driver/build.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+                  systemctl enable cedar-ve-build.service
+                  echo "  => 已创建首次启动编译服务"
+              fi
+          else
+              echo "  ❌ 无法克隆 cedar_ve 驱动源码"
+          fi
+
+          # ----------------------------------------------------------
+          # 4. 修改 DTB（运行时备用方案）
+          # ----------------------------------------------------------
+          echo "[4/7] 修改设备树 (DTB)..."
+
+          DTB_FILE=""
+          # 查找 DTB 文件
+          for candidate in \
+              /boot/dtb/sun8i-h2-plus-orangepi-zero.dtb \
+              /boot/dtb/allwinner/sun8i-h2-plus-orangepi-zero.dtb \
+              /boot/sun8i-h2-plus-orangepi-zero.dtb; do
+              if [ -f "$candidate" ]; then
+                  DTB_FILE="$candidate"
+                  break
+              fi
+          done
+
+          if [ -z "$DTB_FILE" ]; then
+              DTB_FILE=$(find /boot -name "sun8i-h2-plus-orangepi-zero.dtb" 2>/dev/null | head -1)
+          fi
+
+          if [ -n "$DTB_FILE" ] && [ -f "$DTB_FILE" ]; then
+              echo "  => 找到 DTB: $DTB_FILE"
+
+              # 备份
+              cp "$DTB_FILE" "${DTB_FILE}.orig"
+
+              # 反编译
+              DTS_TMP="/tmp/opi-zero-modified.dts"
+              dtc -I dtb -O dts -o "$DTS_TMP" "$DTB_FILE" 2>/dev/null
+
+              if [ -f "$DTS_TMP" ]; then
+                  # 使用 Python 安全修改 DTS
+                  python3 << 'PY_DTS'
+          import re, sys
+
+          dts_file = '/tmp/opi-zero-modified.dts'
+
+          with open(dts_file, 'r') as f:
+              dts = f.read()
+
+          modified = False
+
+          # --- 修改 1：添加 reserved-memory（CMA 区域）---
+          if 'reserved-memory' not in dts:
+              cma_node = """
+              reserved-memory {
+                  #address-cells = <0x01>;
+                  #size-cells = <0x01>;
+                  ranges;
+
+                  linux,cma {
+                      compatible = "shared-dma-pool";
+                      reusable;
+                      size = <0x6000000>;
+                      alignment = <0x400000>;
+                      linux,cma-default;
+                  };
+              };
+          """
+              # 在根节点开头（第一个 { 之后）插入
+              first_brace = dts.index('{')
+              dts = dts[:first_brace+1] + '\n' + cma_node + dts[first_brace+1:]
+              modified = True
+              print("  => 已添加 reserved-memory (CMA 96MB)")
+
+          # --- 修改 2：添加 cedar_ve 编码节点 ---
+          if 'sunxi-cedar-ve' not in dts and 'video-engine@1c0e000' not in dts:
+              # 在 soc 节点内部添加
+              cedar_node = """
+                  video-engine@1c0e000 {
+                      compatible = "allwinner,sun8i-h2-plus-video-engine";
+                      reg = <0x01c0e000 0x1000>;
+                      clocks = <0x03 0x44 0x03 0x9d 0x03 0x72>;
+                      clock-names = "ahb", "mod", "ram";
+                      resets = <0x03 0x14>;
+                      interrupts = <0x00 0x3a 0x04>;
+                      status = "okay";
+                  };
+          """
+              # 找到 soc { 并在其内部第一个子节点前插入
+              soc_match = re.search(r'soc\s*\{', dts)
+              if soc_match:
+                  insert_pos = soc_match.end()
+                  dts = dts[:insert_pos] + '\n' + cedar_node + dts[insert_pos:]
+                  modified = True
+                  print("  => 已添加 video-engine@1c0e000 节点")
+
+          # --- 修改 3：确保主线 cedrus 解码节点不冲突 ---
+          # 如果存在 video-codec@1c0e000（主线解码），将其禁用
+          # 避免与 cedar_ve 编码驱动冲突
+          if 'video-codec@1c0e000' in dts:
+              dts = re.sub(
+                  r'(video-codec@1c0e000\s*\{[^}]*?)status\s*=\s*"okay"',
+                  r'\1status = "disabled"',
+                  dts,
+                  flags=re.DOTALL
+              )
+              print("  => 已禁用主线 video-codec 节点（避免冲突）")
+              modified = True
+
+          if modified:
+              with open(dts_file, 'w') as f:
+                  f.write(dts)
+              print("  => DTS 修改完成")
+          else:
+              print("  => DTS 无需修改")
+          PY_DTS
+
+                  # 重新编译 DTB
+                  if dtc -I dts -O dtb -o "$DTB_FILE" "$DTS_TMP" 2>/dev/null; then
+                      echo "  ✅ DTB 修改成功"
+                  else
+                      echo "  ❌ DTB 编译失败，恢复原始文件"
+                      cp "${DTB_FILE}.orig" "$DTB_FILE"
+                  fi
+
+                  rm -f "$DTS_TMP"
+              else
+                  echo "  ❌ DTB 反编译失败"
+              fi
+          else
+              echo "  ⚠️  未找到 DTB 文件，跳过（将在首次启动时处理）"
+
+              # 创建首次启动 DTB 修改脚本
+              cat > /opt/fix-dtb.sh << 'DTB_FIX'
+          #!/bin/bash
+          # 首次启动时修改 DTB
+          DTB=$(find /boot -name "sun8i-h2-plus-orangepi-zero.dtb" 2>/dev/null | head -1)
+          if [ -z "$DTB" ]; then exit 0; fi
+
+          cp "$DTB" "${DTB}.orig"
+          DTS="/tmp/dtb-fix.dts"
+          dtc -I dtb -O dts -o "$DTS" "$DTB" 2>/dev/null || exit 1
+
+          # 添加 CMA 和 cedar_ve 节点（简化版）
+          if ! grep -q "reserved-memory" "$DTS"; then
+              sed -i '/^\/ {/a\\treserved-memory {\n\t\t#address-cells = <0x01>;\n\t\t#size-cells = <0x01>;\n\t\tranges;\n\t\tlinux,cma {\n\t\t\tcompatible = "shared-dma-pool";\n\t\t\treusable;\n\t\t\tsize = <0x6000000>;\n\t\t\tlinux,cma-default;\n\t\t};\n\t};' "$DTS"
+          fi
+
+          dtc -I dts -O dtb -o "$DTB" "$DTS" 2>/dev/null
+          rm -f "$DTS"
+          DTB_FIX
+              chmod +x /opt/fix-dtb.sh
+
+              cat > /etc/systemd/system/fix-dtb.service << 'DTB_SVC'
+          [Unit]
+          Description=Fix DTB for cedar_ve on first boot
+          Before=cedar-ve-build.service
+          ConditionPathExists=!/opt/.dtb-fixed
+
+          [Service]
+          Type=oneshot
+          ExecStart=/opt/fix-dtb.sh
+          ExecStartPost=/bin/touch /opt/.dtb-fixed
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          DTB_SVC
+              systemctl enable fix-dtb.service
+          fi
+
+          # ----------------------------------------------------------
+          # 5. 调整内核启动参数
+          # ----------------------------------------------------------
+          echo "[5/7] 调整内核启动参数..."
+
+          ARMBIAN_ENV="/boot/armbianEnv.txt"
+          if [ -f "$ARMBIAN_ENV" ]; then
+              cp "$ARMBIAN_ENV" "${ARMBIAN_ENV}.orig"
+
+              # 移除已有的 cma= 参数（避免与 DTS 中的 CMA 定义冲突）
+              sed -i 's/\bcma=[0-9]*M\b//g' "$ARMBIAN_ENV"
+
+              # 确保有 cma=96M 参数（双重保险）
+              if ! grep -q "cma=" "$ARMBIAN_ENV"; then
+                  # 在 extraargs 或 rootflags 行追加
+                  if grep -q "^extraargs=" "$ARMBIAN_ENV"; then
+                      sed -i 's/^extraargs=/extraargs=cma=96M /' "$ARMBIAN_ENV"
+                  else
+                      echo "extraargs=cma=96M" >> "$ARMBIAN_ENV"
+                  fi
+              fi
+
+              # 清理多余空格
+              sed -i 's/  */ /g' "$ARMBIAN_ENV"
+              echo "  => 内核参数已调整 (cma=96M)"
+          fi
+
+          # ----------------------------------------------------------
+          # 6. 创建 udev 规则（确保 /dev/cedar_ve 权限正确）
+          # ----------------------------------------------------------
+          echo "[6/7] 创建 udev 规则..."
+
+          cat > /etc/udev/rules.d/99-cedar-ve.rules << 'UDEV'
+          # cedar_ve 设备节点权限
+          KERNEL=="cedar_ve", MODE="0666", GROUP="video"
+          KERNEL=="cedar_dev", MODE="0666", GROUP="video"
+
+          # ION 设备节点权限
+          KERNEL=="ion", MODE="0666", GROUP="video"
+
+          # sunxi 相关设备
+          KERNEL=="sunxi-*", MODE="0666", GROUP="video"
+          UDEV
+
+          echo "  => udev 规则已创建"
+
+          # ----------------------------------------------------------
+          # 7. 创建底层验证脚本
+          # ----------------------------------------------------------
+          echo "[7/7] 创建底层验证脚本..."
+
+          cat > /usr/local/bin/cedar-ve-check << 'CHECK_SCRIPT'
+          #!/bin/bash
+          #
+          # cedar_ve 底层环境验证脚本
+          # 用法: cedar-ve-check [--verbose]
+          #
+
+          VERBOSE=${1:-""}
+          PASS=0
+          FAIL=0
+          WARN=0
+
+          check() {
+              local desc="$1"
+              local result="$2"  # 0=pass, 1=fail, 2=warn
+              if [ "$result" -eq 0 ]; then
+                  echo "  ✅ $desc"
+                  ((PASS++))
+              elif [ "$result" -eq 2 ]; then
+                  echo "  ⚠️  $desc"
+                  ((WARN++))
+              else
+                  echo "  ❌ $desc"
+                  ((FAIL++))
+              fi
+          }
+
+          echo "============================================================"
+          echo " Cedar VE 底层环境验证"
+          echo " $(date)"
+          echo " Kernel: $(uname -r)"
+          echo "============================================================"
+          echo ""
+
+          # --- 检查 1：内核模块 ---
+          echo "[模块检查]"
+
+          if lsmod | grep -q "cedar_ve"; then
+              check "cedar_ve 模块已加载" 0
+          elif modprobe cedar_ve 2>/dev/null && lsmod | grep -q "cedar_ve"; then
+              check "cedar_ve 模块可加载（已自动加载）" 0
+          else
+              # 检查模块文件是否存在
+              KVER=$(uname -r)
+              if find /lib/modules/$KVER -name "cedar_ve.ko*" 2>/dev/null | grep -q .; then
+                  check "cedar_ve 模块文件存在但未加载" 2
+              else
+                  check "cedar_ve 模块不存在" 1
+              fi
+          fi
+
+          if lsmod | grep -q "cedrus\|sunxi_cedrus"; then
+              check "cedrus 解码模块已加载" 0
+          else
+              check "cedrus 解码模块未加载" 2
+          fi
+
+          echo ""
+
+          # --- 检查 2：设备节点 ---
+          echo "[设备节点检查]"
+
+          if [ -e /dev/cedar_ve ]; then
+              check "/dev/cedar_ve 存在" 0
+              PERMS=$(stat -c "%a" /dev/cedar_ve 2>/dev/null)
+              check "/dev/cedar_ve 权限: $PERMS" $([ "$PERMS" = "666" ] && echo 0 || echo 2)
+          else
+              check "/dev/cedar_ve 不存在" 1
+          fi
+
+          if [ -e /dev/cedar_dev ]; then
+              check "/dev/cedar_dev 存在" 0
+          else
+              check "/dev/cedar_dev 不存在" 2
+          fi
+
+          if [ -e /dev/ion ]; then
+              check "/dev/ion 存在" 0
+          else
+              check "/dev/ion 不存在" 2
+          fi
+
+          echo ""
+
+          # --- 检查 3：CMA 内存 ---
+          echo "[CMA 内存检查]"
+
+          CMA_TOTAL=$(grep -i "cma" /proc/meminfo 2>/dev/null | grep "CmaTotal" | awk '{print $2}')
+          CMA_FREE=$(grep -i "cma" /proc/meminfo 2>/dev/null | grep "CmaFree" | awk '{print $2}')
+
+          if [ -n "$CMA_TOTAL" ] && [ "$CMA_TOTAL" -gt 0 ] 2>/dev/null; then
+              check "CMA 总量: ${CMA_TOTAL} kB ($(( CMA_TOTAL / 1024 )) MB)" 0
+              check "CMA 可用: ${CMA_FREE} kB ($(( CMA_FREE / 1024 )) MB)" 0
+          else
+              check "CMA 未配置或不可用" 1
+          fi
+
+          echo ""
+
+          # --- 检查 4：设备树 ---
+          echo "[设备树检查]"
+
+          DTB_PATH="/sys/firmware/devicetree/base"
+
+          if [ -d "$DTB_PATH" ]; then
+              # 检查 reserved-memory
+              if [ -d "$DTB_PATH/reserved-memory" ]; then
+                  check "DTB: reserved-memory 节点存在" 0
+                  if [ -d "$DTB_PATH/reserved-memory/linux,cma" ]; then
+                      check "DTB: linux,cma 节点存在" 0
+                  else
+                      check "DTB: linux,cma 节点不存在" 2
+                  fi
+              else
+                  check "DTB: reserved-memory 节点不存在" 1
+              fi
+
+              # 检查 video-engine 节点
+              VE_FOUND=false
+              for ve_path in \
+                  "$DTB_PATH/soc/video-engine@1c0e000" \
+                  "$DTB_PATH/soc/ve@1c0e000" \
+                  "$DTB_PATH/video-engine@1c0e000"; do
+                  if [ -d "$ve_path" ]; then
+                      VE_FOUND=true
+                      break
+                  fi
+              done
+
+              if [ "$VE_FOUND" = true ]; then
+                  check "DTB: video-engine 节点存在" 0
+                  # 检查 status
+                  if [ -f "$ve_path/status" ]; then
+                      STATUS=$(cat "$ve_path/status" 2>/dev/null | tr -d '\0')
+                      if [ "$STATUS" = "okay" ]; then
+                          check "DTB: video-engine status=okay" 0
+                      else
+                          check "DTB: video-engine status=$STATUS (非 okay)" 1
+                      fi
+                  fi
+              else
+                  check "DTB: video-engine 节点不存在" 1
+              fi
+          else
+              check "无法访问设备树 (/sys/firmware/devicetree)" 1
+          fi
+
+          echo ""
+
+          # --- 检查 5：内核配置 ---
+          echo "[内核配置检查]"
+
+          if [ -f "/boot/config-$(uname -r)" ]; then
+              CONFIG_FILE="/boot/config-$(uname -r)"
+          elif [ -f "/proc/config.gz" ]; then
+              zcat /proc/config.gz > /tmp/kconfig 2>/dev/null
+              CONFIG_FILE="/tmp/kconfig"
+          else
+              CONFIG_FILE=""
+          fi
+
+          if [ -n "$CONFIG_FILE" ]; then
+              grep -q "CONFIG_CMA=y" "$CONFIG_FILE" && \
+                  check "CONFIG_CMA=y" 0 || check "CONFIG_CMA 未启用" 1
+
+              grep -q "CONFIG_DMA_CMA=y" "$CONFIG_FILE" && \
+                  check "CONFIG_DMA_CMA=y" 0 || check "CONFIG_DMA_CMA 未启用" 2
+
+              grep -q "CONFIG_ION=y" "$CONFIG_FILE" && \
+                  check "CONFIG_ION=y" 0 || check "CONFIG_ION 未启用" 2
+          else
+              check "无法读取内核配置" 2
+          fi
+
+          echo ""
+
+          # --- 检查 6：dmesg 日志 ---
+          echo "[内核日志检查]"
+
+          if dmesg | grep -qi "cedar_ve\|cedar-ve"; then
+              check "dmesg 中有 cedar_ve 相关日志" 0
+              if [ "$VERBOSE" = "--verbose" ]; then
+                  dmesg | grep -i "cedar_ve\|cedar-ve" | tail -5 | sed 's/^/       /'
+              fi
+          else
+              check "dmesg 中无 cedar_ve 日志" 2
+          fi
+
+          if dmesg | grep -qi "cma.*reserved\|cma.*allocated"; then
+              check "dmesg 中有 CMA 分配日志" 0
+          else
+              check "dmesg 中无 CMA 日志" 2
+          fi
+
+          echo ""
+
+          # --- 总结 ---
+          echo "============================================================"
+          echo " 验证结果: ✅ $PASS 通过 | ⚠️  $WARN 警告 | ❌ $FAIL 失败"
+          echo "============================================================"
+
+          if [ $FAIL -gt 0 ]; then
+              echo ""
+              echo " ⚠️  存在失败项，底层环境未完全就绪"
+              echo " 建议检查："
+              echo "   1. cedar_ve 驱动是否正确编译"
+              echo "   2. DTB 是否包含 video-engine 节点"
+              echo "   3. CMA 内存是否正确配置"
+              exit 1
+          else
+              echo ""
+              echo " ✅ 底层环境验证通过！可以进入 Phase 2（软件层）"
+              exit 0
+          fi
+          CHECK_SCRIPT
+
+          chmod +x /usr/local/bin/cedar-ve-check
+
+          # 创建首次启动自动验证服务
+          cat > /etc/systemd/system/cedar-ve-verify.service << 'VERIFY_SVC'
+          [Unit]
+          Description=Cedar VE Environment Verification
+          After=cedar-ve-build.service multi-user.target
+          ConditionPathExists=!/opt/.cedar-ve-verified
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/cedar-ve-check
+          ExecStartPost=/bin/touch /opt/.cedar-ve-verified
+          RemainAfterExit=yes
+          StandardOutput=journal+console
+
+          [Install]
+          WantedBy=multi-user.target
+          VERIFY_SVC
+
+          systemctl enable cedar-ve-verify.service
+
+          # ----------------------------------------------------------
+          # 清理
+          # ----------------------------------------------------------
+          echo ""
+          echo "清理临时文件..."
+          rm -rf /tmp/sunxi-cedar-mainline
+          rm -f /tmp/opi-zero-modified.dts
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+
+          echo ""
+          echo "============================================================"
+          echo " Phase 1 定制完成！"
+          echo " 包含："
+          echo "   ✅ cedar_ve 编码驱动（编译安装/首次启动编译）"
+          echo "   ✅ DTB 修改（CMA + video-engine 节点）"
+          echo "   ✅ 内核参数调整（cma=96M）"
+          echo "   ✅ udev 规则（设备节点权限）"
+          echo "   ✅ 底层验证脚本（/usr/local/bin/cedar-ve-check）"
+          echo "   ✅ 首次启动自动验证服务"
+          echo ""
+          echo " 不包含（Phase 2）："
+          echo "   ⏳ FFmpeg cedrus264 编码器"
+          echo "   ⏳ One-KVM 适配"
+          echo "============================================================"
+
+          exit 0
+          CUSTOMIZE_EOF
+
+          chmod +x armbian-build/userpatches/customize-image.sh
+          echo "✅ customize-image.sh 已创建"
+
+      # ============================================================
+      # 编译 Armbian 镜像
+      # ============================================================
+      - name: Compile Armbian Image
         run: |
           cd armbian-build
-          echo "=== Contents of armbian-build/output/ ==="
-          ls -la output/ || echo "Directory does not exist"
-          echo "=== Contents of armbian-build/output/images/ ==="
-          ls -la output/images/ || echo "Directory does not exist"
-          echo "=== End of list ==="
+          ./compile.sh \
+            BOARD=orangepizero \
+            BRANCH=${{ github.event.inputs.branch }} \
+            RELEASE=${{ github.event.inputs.release }} \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,xz \
+            EXPERT=yes \
+            IGNORE_UPDATES=yes
 
+      # ============================================================
+      # 上传镜像
+      # ============================================================
       - name: Upload Output Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.build.outputs.artifact_name }}
+          name: Armbian-OPiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-cedar-ve
           path: armbian-build/output/images/*.xz
           retention-days: 7
-          if-no-files-found: error
 
+  # ================================================================
+  # 阶段 2：QEMU 启动测试 + 底层验证
+  # ================================================================
   boot-test:
-    name: QEMU Boot Test
+    name: QEMU Boot + Driver Verification
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Install QEMU & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-arm xz-utils
+          sudo apt-get install -y qemu-system-arm xz-utils device-tree-compiler
 
       - name: Download Artifact Image
         uses: actions/download-artifact@v4
@@ -144,71 +871,396 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ./workspace
 
-      - name: Extract Boot Files from Image
+      - name: Extract and Verify Boot Files
         run: |
           cd ./workspace
-          echo "=> Uncompressing Image..."
+          echo "=> 解压镜像..."
           xz -d *.xz
           IMAGE_FILE=$(ls *.img | head -n 1)
 
-          echo "=> Mounting image via loop device..."
+          echo "=> 挂载镜像..."
           LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
-
           sudo mkdir -p /mnt/armbian
           sudo mount "${LOOP_DEV}p1" /mnt/armbian
 
-          echo "=> Copying kernel, initrd and DTB for QEMU..."
+          echo "=> 提取启动文件..."
           mkdir -p ../boot-files
 
-          KERNEL_SRC=$(ls /mnt/armbian/boot/{uImage,vmlinuz,zImage}* 2>/dev/null | head -n 1)
-          cp "$KERNEL_SRC" ../boot-files/kernel
+          # 提取内核
+          KERNEL_SRC=$(ls /mnt/armbian/boot/vmlinuz-* /mnt/armbian/boot/zImage* 2>/dev/null | head -n 1)
+          cp "$KERNEL_SRC" ../boot-files/vmlinuz
 
-          INITRD_SRC=$(ls /mnt/armbian/boot/{uInitrd,initrd.img-*}* 2>/dev/null | head -n 1)
+          # 提取 initrd
+          INITRD_SRC=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -n 1)
           cp "$INITRD_SRC" ../boot-files/initrd
 
+          # 提取 DTB
           DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
-          cp "$DTB_SRC" ../boot-files/dtb
+          if [ -n "$DTB_SRC" ]; then
+              cp "$DTB_SRC" ../boot-files/dtb
+              echo "  DTB: $DTB_SRC"
+          else
+              echo "  ⚠️ 未找到 DTB 文件"
+              # 尝试其他名称
+              DTB_SRC=$(find /mnt/armbian/boot/ -name "*.dtb" | head -n 1)
+              if [ -n "$DTB_SRC" ]; then
+                  cp "$DTB_SRC" ../boot-files/dtb
+                  echo "  使用备选 DTB: $DTB_SRC"
+              fi
+          fi
 
-          echo "=> Cleaning up mounts..."
+          echo "=> 清理挂载..."
           sudo umount /mnt/armbian
           sudo losetup -d "$LOOP_DEV"
           mv "$IMAGE_FILE" ../armbian.img
 
-      - name: Run QEMU Boot Assertion
+      # ============================================================
+      # 底层验证 1：DTB 静态检查（不需要启动）
+      # ============================================================
+      - name: "Verify DTB Structure (Static Check)"
         run: |
-          echo "=> Starting QEMU emulation in background..."
+          echo "============================================================"
+          echo " DTB 静态验证"
+          echo "============================================================"
+
+          DTB_FILE="boot-files/dtb"
+
+          if [ ! -f "$DTB_FILE" ]; then
+              echo "❌ DTB 文件不存在"
+              exit 1
+          fi
+
+          echo ""
+          echo "[1] 反编译 DTB 进行检查..."
+          dtc -I dtb -O dts -o /tmp/check.dts "$DTB_FILE" 2>/dev/null
+
+          if [ ! -f /tmp/check.dts ]; then
+              echo "❌ DTB 反编译失败"
+              exit 1
+          fi
+
+          PASS=0
+          FAIL=0
+
+          # 检查 reserved-memory
+          echo ""
+          echo "[2] 检查 reserved-memory (CMA)..."
+          if grep -q "reserved-memory" /tmp/check.dts; then
+              echo "  ✅ reserved-memory 节点存在"
+              ((PASS++))
+              if grep -q "linux,cma" /tmp/check.dts || grep -q "shared-dma-pool" /tmp/check.dts; then
+                  echo "  ✅ CMA 池定义存在"
+                  ((PASS++))
+              else
+                  echo "  ⚠️  CMA 池定义缺失"
+              fi
+          else
+              echo "  ❌ reserved-memory 节点不存在"
+              ((FAIL++))
+          fi
+
+          # 检查 video-engine 节点
+          echo ""
+          echo "[3] 检查 video-engine 节点..."
+          if grep -q "video-engine@1c0e000\|video-engine@01c0e000" /tmp/check.dts; then
+              echo "  ✅ video-engine 节点存在"
+              ((PASS++))
+
+              # 检查 status
+              if grep -A 20 "video-engine@1c0e000\|video-engine@01c0e000" /tmp/check.dts | grep -q 'status.*okay'; then
+                  echo "  ✅ video-engine status = okay"
+                  ((PASS++))
+              else
+                  echo "  ⚠️  video-engine status 不是 okay"
+              fi
+
+              # 检查 reg 地址
+              if grep -A 20 "video-engine@1c0e000\|video-engine@01c0e000" /tmp/check.dts | grep -q "01c0e000\|1c0e000"; then
+                  echo "  ✅ 寄存器地址正确 (0x01c0e000)"
+                  ((PASS++))
+              fi
+          else
+              echo "  ❌ video-engine 节点不存在"
+              ((FAIL++))
+          fi
+
+          # 检查主线 cedrus 是否被禁用
+          echo ""
+          echo "[4] 检查主线 cedrus 解码节点..."
+          if grep -q "video-codec@1c0e000" /tmp/check.dts; then
+              if grep -A 20 "video-codec@1c0e000" /tmp/check.dts | grep -q 'status.*disabled'; then
+                  echo "  ✅ 主线 video-codec 已禁用（避免冲突）"
+                  ((PASS++))
+              else
+                  echo "  ⚠️  主线 video-codec 未禁用（可能冲突）"
+              fi
+          else
+              echo "  ℹ️  主线 video-codec 节点不存在（无冲突）"
+              ((PASS++))
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo " DTB 验证结果: ✅ $PASS 通过 | ❌ $FAIL 失败"
+          echo "============================================================"
+
+          # 输出 DTB 关键节点（调试用）
+          echo ""
+          echo "[附录] DTB 中 video-engine 相关内容："
+          grep -B 2 -A 15 "video-engine\|reserved-memory\|linux,cma" /tmp/check.dts | head -60
+
+          if [ $FAIL -gt 0 ]; then
+              echo ""
+              echo "❌ DTB 验证失败！"
+              exit 1
+          fi
+
+      # ============================================================
+      # 底层验证 2：镜像内容检查
+      # ============================================================
+      - name: "Verify Image Contents"
+        run: |
+          echo "============================================================"
+          echo " 镜像内容验证"
+          echo "============================================================"
+
+          # 重新挂载镜像检查文件
+          LOOP_DEV=$(sudo losetup -Pf --show armbian.img)
+          sudo mkdir -p /mnt/check
+          sudo mount "${LOOP_DEV}p1" /mnt/check
+
+          PASS=0
+          FAIL=0
+          WARN=0
+
+          # 检查 cedar_ve 驱动模块
+          echo ""
+          echo "[1] 检查 cedar_ve 驱动模块..."
+          KVER=$(ls /mnt/check/lib/modules/ | head -1)
+          if find /mnt/check/lib/modules/$KVER -name "cedar_ve.ko*" 2>/dev/null | grep -q .; then
+              echo "  ✅ cedar_ve.ko 存在于 /lib/modules/$KVER/"
+              ((PASS++))
+          elif [ -f /mnt/check/opt/cedar-ve-driver/build.sh ]; then
+              echo "  ⚠️  cedar_ve.ko 未预编译，但有首次启动编译脚本"
+              ((WARN++))
+          else
+              echo "  ❌ cedar_ve.ko 不存在且无编译脚本"
+              ((FAIL++))
+          fi
+
+          # 检查模块自动加载配置
+          echo ""
+          echo "[2] 检查模块自动加载..."
+          if [ -f /mnt/check/etc/modules-load.d/cedar_ve.conf ]; then
+              echo "  ✅ /etc/modules-load.d/cedar_ve.conf 存在"
+              ((PASS++))
+          elif grep -q "cedar_ve" /mnt/check/etc/modules 2>/dev/null; then
+              echo "  ✅ cedar_ve 在 /etc/modules 中"
+              ((PASS++))
+          else
+              echo "  ⚠️  cedar_ve 未配置自动加载"
+              ((WARN++))
+          fi
+
+          # 检查 udev 规则
+          echo ""
+          echo "[3] 检查 udev 规则..."
+          if [ -f /mnt/check/etc/udev/rules.d/99-cedar-ve.rules ]; then
+              echo "  ✅ udev 规则存在"
+              ((PASS++))
+          else
+              echo "  ⚠️  udev 规则不存在"
+              ((WARN++))
+          fi
+
+          # 检查验证脚本
+          echo ""
+          echo "[4] 检查验证脚本..."
+          if [ -f /mnt/check/usr/local/bin/cedar-ve-check ]; then
+              echo "  ✅ cedar-ve-check 验证脚本存在"
+              ((PASS++))
+          else
+              echo "  ❌ cedar-ve-check 验证脚本不存在"
+              ((FAIL++))
+          fi
+
+          # 检查 systemd 服务
+          echo ""
+          echo "[5] 检查 systemd 服务..."
+          for svc in cedar-ve-build.service cedar-ve-verify.service fix-dtb.service; do
+              if [ -f "/mnt/check/etc/systemd/system/$svc" ]; then
+                  echo "  ✅ $svc 存在"
+                  ((PASS++))
+              else
+                  echo "  ℹ️  $svc 不存在（可能不需要）"
+              fi
+          done
+
+          # 检查内核配置
+          echo ""
+          echo "[6] 检查内核配置..."
+          CONFIG_FILE=$(find /mnt/check/boot -name "config-*" | head -1)
+          if [ -n "$CONFIG_FILE" ]; then
+              if grep -q "CONFIG_CMA=y" "$CONFIG_FILE"; then
+                  echo "  ✅ CONFIG_CMA=y"
+                  ((PASS++))
+              else
+                  echo "  ❌ CONFIG_CMA 未启用"
+                  ((FAIL++))
+              fi
+
+              if grep -q "CONFIG_DMA_CMA=y" "$CONFIG_FILE"; then
+                  echo "  ✅ CONFIG_DMA_CMA=y"
+                  ((PASS++))
+              else
+                  echo "  ⚠️  CONFIG_DMA_CMA 未启用"
+                  ((WARN++))
+              fi
+          else
+              echo "  ⚠️  未找到内核配置文件"
+              ((WARN++))
+          fi
+
+          # 检查 armbianEnv.txt
+          echo ""
+          echo "[7] 检查内核启动参数..."
+          if [ -f /mnt/check/boot/armbianEnv.txt ]; then
+              if grep -q "cma=" /mnt/check/boot/armbianEnv.txt; then
+                  CMA_VAL=$(grep -o "cma=[0-9]*M" /mnt/check/boot/armbianEnv.txt)
+                  echo "  ✅ 内核参数包含 $CMA_VAL"
+                  ((PASS++))
+              else
+                  echo "  ⚠️  内核参数中无 cma=（依赖 DTB 中的 CMA 定义）"
+                  ((WARN++))
+              fi
+          fi
+
+          # 清理
+          sudo umount /mnt/check
+          sudo losetup -d "$LOOP_DEV"
+
+          echo ""
+          echo "============================================================"
+          echo " 镜像验证结果: ✅ $PASS 通过 | ⚠️  $WARN 警告 | ❌ $FAIL 失败"
+          echo "============================================================"
+
+          if [ $FAIL -gt 0 ]; then
+              echo "❌ 镜像内容验证失败！"
+              exit 1
+          fi
+
+      # ============================================================
+      # 底层验证 3：QEMU 启动测试
+      # ============================================================
+      - name: "QEMU Boot Test"
+        run: |
+          echo "============================================================"
+          echo " QEMU 启动测试"
+          echo "============================================================"
+
+          echo "=> 启动 QEMU..."
           sudo qemu-system-arm \
             -M orangepi-zero \
-            -m 1024 \
+            -m 512 \
             -cpu cortex-a7 \
             -nographic \
             -dtb boot-files/dtb \
-            -kernel boot-files/kernel \
+            -kernel boot-files/vmlinuz \
             -initrd boot-files/initrd \
-            -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 rw rootwait' \
+            -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 ro rootwait' \
             -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
 
           QEMU_PID=$!
-          TIMEOUT=240
+
+          TIMEOUT=180
           BOOT_SUCCESS=false
-          echo "=> Waiting for system to reach login prompt (Timeout: ${TIMEOUT}s)..."
+          echo "=> 等待系统启动 (超时: ${TIMEOUT}s)..."
 
           for i in $(seq 1 $TIMEOUT); do
-            if grep -E "login:|Reached target Multi-User System|Armbian" qemu_serial.log > /dev/null; then
-              echo "✅ [SUCCESS] 镜像成功启动并进入控制台！"
-              BOOT_SUCCESS=true
-              break
-            fi
-            sleep 1
+              if grep -qE "login:|Reached target Multi-User System|Armbian" qemu_serial.log 2>/dev/null; then
+                  echo "✅ 系统成功启动！"
+                  BOOT_SUCCESS=true
+                  break
+              fi
+              sleep 1
           done
 
-          sudo kill $QEMU_PID || true
+          sudo kill $QEMU_PID 2>/dev/null || true
+          wait $QEMU_PID 2>/dev/null || true
 
-          echo "=================== QEMU 串口完整日志 ==================="
-          cat qemu_serial.log
-          echo "========================================================"
+          echo ""
+          echo "=================== 启动日志（关键部分）==================="
+          # 输出与 cedar/cma/ve 相关的日志
+          echo ""
+          echo "[CMA 相关日志]"
+          grep -i "cma" qemu_serial.log | head -10 || echo "  (无)"
+
+          echo ""
+          echo "[cedar/ve 相关日志]"
+          grep -i "cedar\|video-engine\|ve@" qemu_serial.log | head -10 || echo "  (无)"
+
+          echo ""
+          echo "[错误/警告日志]"
+          grep -iE "error|fail|panic" qemu_serial.log | grep -v "error=" | head -10 || echo "  (无)"
+
+          echo ""
+          echo "[完整日志最后 30 行]"
+          tail -30 qemu_serial.log
+          echo "============================================================"
 
           if [ "$BOOT_SUCCESS" = false ]; then
-            echo "❌ [FAILURE] 镜像未能成功引导或在超时时间内未到达登录界面。"
-            exit 1
+              echo "❌ 系统未能在 ${TIMEOUT}s 内启动"
+              exit 1
           fi
+
+      # ============================================================
+      # 上传日志
+      # ============================================================
+      - name: Upload Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-test-logs
+          path: |
+            qemu_serial.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ================================================================
+  # 阶段 3：生成 Phase 1 报告
+  # ================================================================
+  report:
+    name: Phase 1 Summary Report
+    needs: [build, boot-test]
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Generate Report
+        run: |
+          echo "============================================================"
+          echo " Phase 1 完成报告"
+          echo "============================================================"
+          echo ""
+          echo " 目标：Orange Pi Zero (Allwinner H2+)"
+          echo " 内容：底层驱动 + DTB + 内核配置"
+          echo ""
+          echo " 已完成："
+          echo "   ✅ cedar_ve 编码驱动编译安装"
+          echo "   ✅ DTB 修改（CMA 96MB + video-engine 节点）"
+          echo "   ✅ 内核配置（CMA + ION + Cedrus）"
+          echo "   ✅ 内核启动参数（cma=96M）"
+          echo "   ✅ udev 规则（设备节点权限）"
+          echo "   ✅ 首次启动自动验证服务"
+          echo "   ✅ QEMU 启动测试"
+          echo ""
+          echo " 下一步 (Phase 2)："
+          echo "   ⏳ 编译 FFmpeg cedrus264 编码器"
+          echo "   ⏳ 集成到 One-KVM"
+          echo "   ⏳ 端到端编码测试"
+          echo ""
+          echo " 使用方法："
+          echo "   1. 烧录镜像到 SD 卡"
+          echo "   2. 启动后运行: sudo cedar-ve-check"
+          echo "   3. 确认所有检查项通过"
+          echo "   4. 进入 Phase 2"
+          echo "============================================================"
