@@ -47,18 +47,33 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：手动预下载卡住的工具链 ==========
-      - name: Pre-download stuck toolchain
+      # ========== 核心修复：手动预下载并解压卡住的工具链 ==========
+      - name: Manually prepare stuck toolchain
         run: |
           cd armbian-build
-          mkdir -p cache/toolchain
-          echo "Downloading gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz..."
-          wget -nv -t 5 -T 120 -O cache/toolchain/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz \
-            https://releases.linaro.org/archive/13.11/components/toolchain/binaries/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz || \
-            echo "Warning: Manual download failed, will rely on Armbian's built-in download."
-          # 创建标记文件，让 Armbian 认为已下载完成
-          touch cache/toolchain/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz.download-complete
-          echo "Toolchain pre-download completed."
+          TOOLCHAIN_DIR="cache/toolchain"
+          TOOLCHAIN_FILE="gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz"
+          mkdir -p "${TOOLCHAIN_DIR}"
+
+          # 检查文件是否已存在，若不存在则下载
+          if [ ! -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
+            echo "::group::Downloading ${TOOLCHAIN_FILE} manually..."
+            wget -nv -t 5 -T 300 \
+              -O "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" \
+              "https://releases.linaro.org/archive/13.11/components/toolchain/binaries/${TOOLCHAIN_FILE}"
+            echo "::endgroup::"
+          else
+            echo "Toolchain file already exists, skipping download."
+          fi
+
+          # 解压到工具链目录（Armbian 构建脚本期望的位置）
+          echo "::group::Extracting ${TOOLCHAIN_FILE}..."
+          tar -xf "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" -C "${TOOLCHAIN_DIR}/"
+          echo "::endgroup::"
+
+          # 创建标记文件，告诉 Armbian 构建脚本这个工具链已准备就绪
+          touch "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}.download-complete"
+          echo "Toolchain preparation complete."
 
       - name: Prepare aria2 cache directory
         run: |
@@ -81,7 +96,7 @@ jobs:
           EXPERT="yes"
           EOF
 
-      # ========== 使用 expect 自动化交互并输出详细日志，禁用 aria2 ==========
+      # ========== 使用 expect 自动化交互并输出详细日志 ==========
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
