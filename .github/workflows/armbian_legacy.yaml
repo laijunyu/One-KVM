@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect wget
+            libncurses-dev libssl-dev expect curl
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -47,7 +47,7 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：手动预下载并解压卡住的工具链 ==========
+      # ========== 核心修复：手动预下载并校验工具链 ==========
       - name: Manually prepare stuck toolchain
         run: |
           cd armbian-build
@@ -55,23 +55,34 @@ jobs:
           TOOLCHAIN_FILE="gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz"
           mkdir -p "${TOOLCHAIN_DIR}"
 
-          # 检查文件是否已存在，若不存在则下载
-          if [ ! -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
-            echo "::group::Downloading ${TOOLCHAIN_FILE} manually..."
-            wget -nv -t 5 -T 300 \
-              -O "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" \
-              "https://releases.linaro.org/archive/13.11/components/toolchain/binaries/${TOOLCHAIN_FILE}"
-            echo "::endgroup::"
-          else
-            echo "Toolchain file already exists, skipping download."
+          # 如果文件存在但损坏，删除并重新下载
+          if [ -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
+            echo "Checking existing file integrity..."
+            if ! xz -t "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" 2>/dev/null; then
+              echo "File corrupted, removing..."
+              rm -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}"
+            fi
           fi
 
-          # 解压到工具链目录（Armbian 构建脚本期望的位置）
+          if [ ! -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
+            echo "::group::Downloading ${TOOLCHAIN_FILE} with curl..."
+            curl -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 \
+              -o "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" \
+              "https://releases.linaro.org/archive/13.11/components/toolchain/binaries/${TOOLCHAIN_FILE}"
+            echo "::endgroup::"
+          fi
+
+          # 再次校验，防止下载过程中损坏
+          if ! xz -t "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" 2>/dev/null; then
+            echo "ERROR: Downloaded file is still corrupted. Exiting."
+            exit 1
+          fi
+
           echo "::group::Extracting ${TOOLCHAIN_FILE}..."
           tar -xf "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" -C "${TOOLCHAIN_DIR}/"
           echo "::endgroup::"
 
-          # 创建标记文件，告诉 Armbian 构建脚本这个工具链已准备就绪
+          # 创建标记文件，让 Armbian 跳过自身的下载和解压
           touch "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}.download-complete"
           echo "Toolchain preparation complete."
 
