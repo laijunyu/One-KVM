@@ -47,12 +47,13 @@ jobs:
           cd armbian-build
           git checkout v23.02
 
-      # ========== 核心修复：手动预下载并校验工具链 ==========
-      - name: Manually prepare stuck toolchain
+      # ========== 方案二：使用 ARM 官方 GNU 工具链 (13.2.Rel1) ==========
+      - name: Manually prepare ARM official toolchain
         run: |
           cd armbian-build
           TOOLCHAIN_DIR="cache/toolchain"
-          TOOLCHAIN_FILE="gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz"
+          # 使用 ARM 官方 13.2.Rel1 版本工具链
+          TOOLCHAIN_FILE="arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz"
           mkdir -p "${TOOLCHAIN_DIR}"
 
           # 如果文件存在但损坏，删除并重新下载
@@ -65,10 +66,10 @@ jobs:
           fi
 
           if [ ! -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
-            echo "::group::Downloading ${TOOLCHAIN_FILE} with curl..."
+            echo "::group::Downloading ARM official toolchain ${TOOLCHAIN_FILE} with curl..."
             curl -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 \
               -o "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" \
-              "https://releases.linaro.org/archive/13.11/components/toolchain/binaries/${TOOLCHAIN_FILE}"
+              "https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/${TOOLCHAIN_FILE}"
             echo "::endgroup::"
           fi
 
@@ -82,8 +83,8 @@ jobs:
           tar -xf "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" -C "${TOOLCHAIN_DIR}/"
           echo "::endgroup::"
 
-          # 创建标记文件，让 Armbian 跳过自身的下载和解压
-          touch "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}.download-complete"
+          # 关键：创建与 Armbian 期望的旧文件名匹配的标记文件
+          touch "${TOOLCHAIN_DIR}/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz.download-complete"
           echo "Toolchain preparation complete."
 
       - name: Prepare aria2 cache directory
@@ -113,7 +114,7 @@ jobs:
           cd armbian-build
           export DIALOG=disabled
           export TERM=dumb
-          export USE_ARIA2=no   # 禁用 aria2，改用 wget
+          export USE_ARIA2=no
           expect -c '
             log_user 1
             set timeout 7200
@@ -186,25 +187,25 @@ jobs:
           echo "=> Uncompressing Image..."
           xz -d *.xz
           IMAGE_FILE=$(ls *.img | head -n 1)
-          
+
           echo "=> Mounting image via loop device..."
           LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
-          
+
           sudo mkdir -p /mnt/armbian
           sudo mount "${LOOP_DEV}p1" /mnt/armbian
-          
+
           echo "=> Copying kernel, initrd and DTB for QEMU..."
           mkdir -p ../boot-files
-          
+
           KERNEL_SRC=$(ls /mnt/armbian/boot/{uImage,vmlinuz,zImage}* 2>/dev/null | head -n 1)
           cp "$KERNEL_SRC" ../boot-files/kernel
-          
+
           INITRD_SRC=$(ls /mnt/armbian/boot/{uInitrd,initrd.img-*}* 2>/dev/null | head -n 1)
           cp "$INITRD_SRC" ../boot-files/initrd
-          
+
           DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
           cp "$DTB_SRC" ../boot-files/dtb
-          
+
           echo "=> Cleaning up mounts..."
           sudo umount /mnt/armbian
           sudo losetup -d "$LOOP_DEV"
@@ -223,12 +224,12 @@ jobs:
             -initrd boot-files/initrd \
             -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 rw rootwait' \
             -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
-          
+
           QEMU_PID=$!
           TIMEOUT=240
           BOOT_SUCCESS=false
           echo "=> Waiting for system to reach login prompt (Timeout: ${TIMEOUT}s)..."
-          
+
           for i in $(seq 1 $TIMEOUT); do
             if grep -E "login:|Reached target Multi-User System|Armbian" qemu_serial.log > /dev/null; then
               echo "✅ [SUCCESS] 镜像成功启动并进入控制台！"
@@ -237,13 +238,13 @@ jobs:
             fi
             sleep 1
           done
-          
+
           sudo kill $QEMU_PID || true
-          
+
           echo "=================== QEMU 串口完整日志 ==================="
           cat qemu_serial.log
           echo "========================================================"
-          
+
           if [ "$BOOT_SUCCESS" = false ]; then
             echo "❌ [FAILURE] 镜像未能成功引导或在超时时间内未到达登录界面。"
             exit 1
