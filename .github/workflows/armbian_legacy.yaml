@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support \
             gcc-arm-linux-gnueabihf u-boot-tools device-tree-compiler \
-            libncurses-dev libssl-dev expect curl
+            libncurses-dev libssl-dev expect
 
       - name: Disable Docker to Force Native Build
         run: |
@@ -46,46 +46,6 @@ jobs:
           git clone https://github.com/armbian/build armbian-build
           cd armbian-build
           git checkout v23.02
-
-      # ========== 方案二：使用 ARM 官方 GNU 工具链 (13.2.Rel1) ==========
-      - name: Manually prepare ARM official toolchain
-        run: |
-          cd armbian-build
-          TOOLCHAIN_DIR="cache/toolchain"
-          # 使用 ARM 官方 13.2.Rel1 版本工具链
-          TOOLCHAIN_FILE="arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz"
-          mkdir -p "${TOOLCHAIN_DIR}"
-
-          # 如果文件存在但损坏，删除并重新下载
-          if [ -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
-            echo "Checking existing file integrity..."
-            if ! xz -t "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" 2>/dev/null; then
-              echo "File corrupted, removing..."
-              rm -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}"
-            fi
-          fi
-
-          if [ ! -f "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" ]; then
-            echo "::group::Downloading ARM official toolchain ${TOOLCHAIN_FILE} with curl..."
-            curl -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 \
-              -o "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" \
-              "https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/${TOOLCHAIN_FILE}"
-            echo "::endgroup::"
-          fi
-
-          # 再次校验，防止下载过程中损坏
-          if ! xz -t "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" 2>/dev/null; then
-            echo "ERROR: Downloaded file is still corrupted. Exiting."
-            exit 1
-          fi
-
-          echo "::group::Extracting ${TOOLCHAIN_FILE}..."
-          tar -xf "${TOOLCHAIN_DIR}/${TOOLCHAIN_FILE}" -C "${TOOLCHAIN_DIR}/"
-          echo "::endgroup::"
-
-          # 关键：创建与 Armbian 期望的旧文件名匹配的标记文件
-          touch "${TOOLCHAIN_DIR}/gcc-linaro-aarch64-none-elf-4.8-2013.11_linux.tar.xz.download-complete"
-          echo "Toolchain preparation complete."
 
       - name: Prepare aria2 cache directory
         run: |
@@ -108,13 +68,16 @@ jobs:
           EXPERT="yes"
           EOF
 
-      # ========== 使用 expect 自动化交互并输出详细日志 ==========
+      # ========== 核心修复：强制跳过内置工具链下载，使用系统工具链 ==========
       - name: Compile Armbian Image (legacy kernel)
         run: |
           cd armbian-build
           export DIALOG=disabled
           export TERM=dumb
           export USE_ARIA2=no
+          # 关键环境变量：强制使用 GitHub Runner 自带的工具链，跳过 Armbian 内置下载
+          export USE_GITHUB_RUNNER_TOOLCHAIN=yes
+          export SKIP_TOOLCHAIN_DOWNLOAD=yes
           expect -c '
             log_user 1
             set timeout 7200
