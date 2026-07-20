@@ -55,7 +55,6 @@ jobs:
       - name: Configure Kernel (CMA + ION)
         run: |
           mkdir -p armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}
-
           cat << 'EOF' > armbian-build/userpatches/kernel/sunxi-${{ github.event.inputs.branch }}/cedar-ve.cfg
           CONFIG_VIDEO_SUNXI_CEDRUS=m
           CONFIG_MEDIA_CONTROLLER=y
@@ -71,7 +70,6 @@ jobs:
           CONFIG_OF_OVERLAY=y
           CONFIG_OF_CONFIGFS=y
           EOF
-
           echo "✅ 内核配置补丁已创建"
 
       # ============================================================
@@ -80,7 +78,6 @@ jobs:
       - name: Inject Customize Script
         run: |
           mkdir -p armbian-build/userpatches
-
           cat << 'CUSTOMIZE_EOF' > armbian-build/userpatches/customize-image.sh
           #!/bin/bash
           #
@@ -90,7 +87,6 @@ jobs:
           # 策略：安装首次启动脚本，在真实硬件上第一次开机时修改 DTB
           # ============================================================
           #
-
           RELEASE=$1
           LINUXFAMILY=$2
           BOARD=$3
@@ -136,7 +132,6 @@ jobs:
           # 3. 编译安装 cedar_ve 驱动
           # ----------------------------------------------------------
           echo "[3/6] 编译 cedar_ve 驱动..."
-
           KERNEL_VERSION=$(ls /lib/modules/ | head -1)
           KERNEL_HEADERS_DIR="/usr/src/linux-headers-${KERNEL_VERSION}"
 
@@ -200,10 +195,12 @@ jobs:
           Description=Build cedar_ve on first boot
           After=local-fs.target
           ConditionPathExists=!/opt/cedar-ve-driver/.built
+
           [Service]
           Type=oneshot
           ExecStart=/opt/cedar-ve-driver/build.sh
           RemainAfterExit=yes
+
           [Install]
           WantedBy=multi-user.target
           SVC
@@ -215,7 +212,6 @@ jobs:
           # 4. 创建首次启动 DTB 修改脚本（核心！）
           # ----------------------------------------------------------
           echo "[4/6] 创建首次启动 DTB 修改脚本..."
-
           mkdir -p /opt/cedar-ve-setup
 
           cat > /opt/cedar-ve-setup/fix-dtb.sh << 'DTB_SCRIPT'
@@ -224,7 +220,6 @@ jobs:
           # 首次启动时修改 DTB，添加 CMA 和 video-engine 节点
           # 由 systemd 服务调用，只运行一次
           #
-
           LOG=/var/log/cedar-ve-dtb.log
           echo "$(date): === DTB 修改开始 ===" > $LOG
 
@@ -263,11 +258,9 @@ jobs:
 
           # --- 添加 reserved-memory (CMA 96MB) ---
           echo "$(date): 添加 reserved-memory..." >> $LOG
-
           fdtput -t s "$DTB" /reserved-memory "#address-cells" "1" >> $LOG 2>&1
           fdtput -t s "$DTB" /reserved-memory "#size-cells" "1" >> $LOG 2>&1
           fdtput -t s "$DTB" /reserved-memory "ranges" "" >> $LOG 2>&1
-
           fdtput -t s "$DTB" /reserved-memory/linux,cma "compatible" "shared-dma-pool" >> $LOG 2>&1
           fdtput -t s "$DTB" /reserved-memory/linux,cma "reusable" "" >> $LOG 2>&1
           fdtput -t x "$DTB" /reserved-memory/linux,cma "size" "0x6000000" >> $LOG 2>&1
@@ -276,7 +269,6 @@ jobs:
 
           # --- 添加 video-engine 节点 ---
           echo "$(date): 添加 video-engine..." >> $LOG
-
           VE_PATH="/soc/video-engine@1c0e000"
           fdtput -t s "$DTB" "$VE_PATH" "compatible" "allwinner,sun8i-h2-plus-video-engine" >> $LOG 2>&1
           fdtput -t x "$DTB" "$VE_PATH" "reg" "0x01c0e000 0x1000" >> $LOG 2>&1
@@ -311,7 +303,6 @@ jobs:
 
           # --- 验证 ---
           echo "$(date): 验证修改..." >> $LOG
-
           VERIFY_PASS=true
 
           RM_COMPAT=$(fdtget "$DTB" /reserved-memory/linux,cma "compatible" 2>/dev/null)
@@ -334,7 +325,6 @@ jobs:
               echo "$(date): === DTB 修改成功 ===" >> $LOG
               touch /opt/cedar-ve-setup/.dtb-fixed
               echo "$(date): 需要重启以加载新 DTB" >> $LOG
-
               # 自动重启（仅在 DTB 修改成功时）
               echo "$(date): 5 秒后自动重启..." >> $LOG
               sleep 5
@@ -345,7 +335,6 @@ jobs:
               exit 1
           fi
           DTB_SCRIPT
-
           chmod +x /opt/cedar-ve-setup/fix-dtb.sh
 
           # 创建 systemd 服务
@@ -365,7 +354,6 @@ jobs:
           [Install]
           WantedBy=multi-user.target
           DTB_SVC
-
           systemctl enable cedar-ve-dtb.service
           echo "  ✅ 首次启动 DTB 修改服务已创建"
 
@@ -399,7 +387,6 @@ jobs:
           # 6. 验证脚本 (已修复算术陷阱)
           # ----------------------------------------------------------
           echo "[6/6] 创建验证脚本..."
-
           cat > /usr/local/bin/cedar-ve-check << 'CHECK_SCRIPT'
           #!/bin/bash
           PASS=0; FAIL=0; WARN=0
@@ -438,6 +425,7 @@ jobs:
           echo ""; echo "[设备树]"
           DTB_BASE="/sys/firmware/devicetree/base"
           [ -d "$DTB_BASE/reserved-memory" ] && check "DTB: reserved-memory" 0 || check "DTB: reserved-memory 缺失" 1
+
           VE_OK=false
           for p in "$DTB_BASE/soc/video-engine@1c0e000" "$DTB_BASE/soc/video-engine@01c0e000"; do
               [ -d "$p" ] && VE_OK=true && break
@@ -474,7 +462,6 @@ jobs:
           echo "============================================================"
           exit 0
           CUSTOMIZE_EOF
-
           chmod +x armbian-build/userpatches/customize-image.sh
           echo "✅ customize-image.sh 已创建"
 
@@ -526,7 +513,6 @@ jobs:
           cd ./workspace
           xz -d *.xz
           IMAGE_FILE=$(ls *.img | head -n 1)
-
           LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
           sudo mkdir -p /mnt/armbian
           sudo mount "${LOOP_DEV}p1" /mnt/armbian
@@ -568,7 +554,6 @@ jobs:
           if [ -f /mnt/check/opt/cedar-ve-setup/fix-dtb.sh ]; then
               echo "  ✅ fix-dtb.sh 存在"
               PASS=$((PASS + 1))
-              # 检查脚本内容是否包含关键操作
               if grep -q "fdtput" /mnt/check/opt/cedar-ve-setup/fix-dtb.sh; then
                   echo "  ✅ 脚本包含 fdtput 命令"
                   PASS=$((PASS + 1))
@@ -592,7 +577,6 @@ jobs:
           if [ -f /mnt/check/etc/systemd/system/cedar-ve-dtb.service ]; then
               echo "  ✅ cedar-ve-dtb.service 存在"
               PASS=$((PASS + 1))
-              # 检查是否启用
               if [ -L /mnt/check/etc/systemd/system/multi-user.target.wants/cedar-ve-dtb.service ]; then
                   echo "  ✅ 服务已启用 (symlink 存在)"
                   PASS=$((PASS + 1))
@@ -679,7 +663,6 @@ jobs:
           echo "============================================================"
           echo " 结果: ✅$PASS ⚠️$WARN ❌$FAIL"
           echo "============================================================"
-
           if [ $FAIL -gt 0 ]; then
               echo "❌ 验证失败"
               exit 1
@@ -689,10 +672,14 @@ jobs:
 
       # ============================================================
       # QEMU 启动测试（仅验证能启动，不检查 DTB 修改）
+      # [FIX] 修复 bash -e 下非零退出码导致步骤失败的问题
       # ============================================================
       - name: "QEMU Boot Test"
         run: |
           echo "=> QEMU 启动测试..."
+
+          # [FIX] 预创建日志文件，避免 tail 因文件不存在而失败
+          touch qemu_serial.log
 
           # 检查必要文件
           if [ ! -f boot-files/vmlinuz ]; then
@@ -704,6 +691,8 @@ jobs:
               exit 0
           fi
 
+          # [FIX] 使用 set +e 防止后台进程启动相关命令触发 bash -e
+          set +e
           sudo qemu-system-arm \
             -M orangepi-zero \
             -m 512 \
@@ -714,11 +703,11 @@ jobs:
             -initrd boot-files/initrd \
             -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 ro rootwait' \
             -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
-
           QEMU_PID=$!
+          set -e
+
           TIMEOUT=180
           BOOT_OK=false
-
           for i in $(seq 1 $TIMEOUT); do
               if grep -qE "login:|Reached target Multi-User|Armbian" qemu_serial.log 2>/dev/null; then
                   BOOT_OK=true
@@ -727,18 +716,23 @@ jobs:
               sleep 1
           done
 
-          sudo kill $QEMU_PID 2>/dev/null; wait $QEMU_PID 2>/dev/null || true
+          # [FIX] 安全清理 QEMU 进程，避免 wait 传播非零退出码
+          set +e
+          sudo kill "$QEMU_PID" 2>/dev/null
+          wait "$QEMU_PID" 2>/dev/null
+          set -e
 
           echo ""
           echo "[启动日志 - 最后 20 行]"
-          tail -20 qemu_serial.log
+          tail -20 qemu_serial.log || true    # [FIX] 防止 tail 失败
           echo ""
 
           if [ "$BOOT_OK" = true ]; then
               echo "✅ 系统启动成功"
+              exit 0                          # [FIX] 显式成功退出
           else
               echo "⚠️ 系统未在 ${TIMEOUT}s 内启动（可能是 QEMU 兼容性问题，不影响真实硬件）"
-              # 不报错退出，因为 QEMU 可能不完全兼容 Orange Pi Zero
+              exit 0                          # [FIX] 显式成功退出，QEMU 兼容性不阻塞 CI
           fi
 
       - name: Upload Logs
