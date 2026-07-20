@@ -396,7 +396,7 @@ jobs:
           UDEV
 
           # ----------------------------------------------------------
-          # 6. 验证脚本
+          # 6. 验证脚本 (已修复算术陷阱)
           # ----------------------------------------------------------
           echo "[6/6] 创建验证脚本..."
 
@@ -405,9 +405,16 @@ jobs:
           PASS=0; FAIL=0; WARN=0
           check() {
               local desc="$1" result="$2"
-              if [ "$result" -eq 0 ]; then echo "  ✅ $desc"; ((PASS++))
-              elif [ "$result" -eq 2 ]; then echo "  ⚠️  $desc"; ((WARN++))
-              else echo "  ❌ $desc"; ((FAIL++)); fi
+              if [ "$result" -eq 0 ]; then 
+                  echo "  ✅ $desc"
+                  PASS=$((PASS + 1))
+              elif [ "$result" -eq 2 ]; then 
+                  echo "  ⚠️  $desc"
+                  WARN=$((WARN + 1))
+              else 
+                  echo "  ❌ $desc"
+                  FAIL=$((FAIL + 1))
+              fi
           }
 
           echo "============================================================"
@@ -541,7 +548,7 @@ jobs:
           mv "$IMAGE_FILE" ../armbian.img
 
       # ============================================================
-      # 验证：检查首次启动脚本是否存在（而非 DTB 内容）
+      # 验证：检查首次启动脚本是否存在（而非 DTB 内容）- 已修复算术陷阱
       # ============================================================
       - name: "Verify First-Boot Scripts Exist"
         run: |
@@ -560,23 +567,23 @@ jobs:
           echo "[1] DTB 修改脚本"
           if [ -f /mnt/check/opt/cedar-ve-setup/fix-dtb.sh ]; then
               echo "  ✅ fix-dtb.sh 存在"
-              ((PASS++))
+              PASS=$((PASS + 1))
               # 检查脚本内容是否包含关键操作
               if grep -q "fdtput" /mnt/check/opt/cedar-ve-setup/fix-dtb.sh; then
                   echo "  ✅ 脚本包含 fdtput 命令"
-                  ((PASS++))
+                  PASS=$((PASS + 1))
               fi
               if grep -q "reserved-memory" /mnt/check/opt/cedar-ve-setup/fix-dtb.sh; then
                   echo "  ✅ 脚本包含 reserved-memory 操作"
-                  ((PASS++))
+                  PASS=$((PASS + 1))
               fi
               if grep -q "video-engine" /mnt/check/opt/cedar-ve-setup/fix-dtb.sh; then
                   echo "  ✅ 脚本包含 video-engine 操作"
-                  ((PASS++))
+                  PASS=$((PASS + 1))
               fi
           else
               echo "  ❌ fix-dtb.sh 不存在"
-              ((FAIL++))
+              FAIL=$((FAIL + 1))
           fi
 
           # 2. systemd 服务
@@ -584,18 +591,18 @@ jobs:
           echo "[2] systemd 服务"
           if [ -f /mnt/check/etc/systemd/system/cedar-ve-dtb.service ]; then
               echo "  ✅ cedar-ve-dtb.service 存在"
-              ((PASS++))
+              PASS=$((PASS + 1))
               # 检查是否启用
               if [ -L /mnt/check/etc/systemd/system/multi-user.target.wants/cedar-ve-dtb.service ]; then
                   echo "  ✅ 服务已启用 (symlink 存在)"
-                  ((PASS++))
+                  PASS=$((PASS + 1))
               else
                   echo "  ⚠️ 服务可能未启用 (无 symlink)"
-                  ((WARN++))
+                  WARN=$((WARN + 1))
               fi
           else
               echo "  ❌ cedar-ve-dtb.service 不存在"
-              ((FAIL++))
+              FAIL=$((FAIL + 1))
           fi
 
           # 3. cedar_ve 驱动
@@ -604,13 +611,13 @@ jobs:
           KVER=$(ls /mnt/check/lib/modules/ 2>/dev/null | head -1)
           if [ -n "$KVER" ] && find /mnt/check/lib/modules/$KVER -name "cedar_ve.ko*" 2>/dev/null | grep -q .; then
               echo "  ✅ cedar_ve.ko 已预编译"
-              ((PASS++))
+              PASS=$((PASS + 1))
           elif [ -f /mnt/check/opt/cedar-ve-driver/build.sh ]; then
               echo "  ⚠️ 未预编译，有首次启动编译脚本"
-              ((WARN++))
+              WARN=$((WARN + 1))
           else
               echo "  ❌ cedar_ve 不可用"
-              ((FAIL++))
+              FAIL=$((FAIL + 1))
           fi
 
           # 4. udev 规则
@@ -618,10 +625,10 @@ jobs:
           echo "[4] udev 规则"
           if [ -f /mnt/check/etc/udev/rules.d/99-cedar-ve.rules ]; then
               echo "  ✅ udev 规则存在"
-              ((PASS++))
+              PASS=$((PASS + 1))
           else
               echo "  ⚠️ udev 规则不存在"
-              ((WARN++))
+              WARN=$((WARN + 1))
           fi
 
           # 5. 验证脚本
@@ -629,10 +636,10 @@ jobs:
           echo "[5] 验证脚本"
           if [ -f /mnt/check/usr/local/bin/cedar-ve-check ]; then
               echo "  ✅ cedar-ve-check 存在"
-              ((PASS++))
+              PASS=$((PASS + 1))
           else
               echo "  ❌ cedar-ve-check 不存在"
-              ((FAIL++))
+              FAIL=$((FAIL + 1))
           fi
 
           # 6. 内核配置
@@ -642,14 +649,14 @@ jobs:
           if [ -n "$CONFIG" ]; then
               if grep -q "CONFIG_CMA=y" "$CONFIG"; then
                   echo "  ✅ CONFIG_CMA=y"
-                  ((PASS++))
+                  PASS=$((PASS + 1))
               else
                   echo "  ⚠️ CONFIG_CMA 未启用"
-                  ((WARN++))
+                  WARN=$((WARN + 1))
               fi
           else
               echo "  ⚠️ 未找到内核配置文件"
-              ((WARN++))
+              WARN=$((WARN + 1))
           fi
 
           # 7. DTB 文件本身（仅确认存在，不检查内容）
@@ -658,11 +665,11 @@ jobs:
           DTB_IN_IMG=$(find /mnt/check/boot -name "sun8i-h2-plus-orangepi-zero.dtb" 2>/dev/null | head -1)
           if [ -n "$DTB_IN_IMG" ]; then
               echo "  ✅ DTB 文件存在: $DTB_IN_IMG ($(stat -c%s "$DTB_IN_IMG") bytes)"
-              ((PASS++))
+              PASS=$((PASS + 1))
               echo "  ℹ️ DTB 将在首次启动时由 fix-dtb.sh 修改"
           else
               echo "  ⚠️ DTB 文件未找到（可能在其他路径）"
-              ((WARN++))
+              WARN=$((WARN + 1))
           fi
 
           sudo umount /mnt/check
