@@ -20,6 +20,17 @@ jobs:
           sudo apt-get clean
           df -h
 
+      # ============================================
+      # 关键修复：在宿主机上注册 QEMU binfmt
+      # 必须在 Armbian 构建之前执行
+      # ============================================
+      - name: Register QEMU binfmt (fix armhf emulation)
+        run: |
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          # 验证注册成功
+          ls /proc/sys/fs/binfmt_misc/ | grep -i qemu || true
+          cat /proc/sys/fs/binfmt_misc/qemu-arm 2>/dev/null || true
+
       - name: Checkout Armbian build framework
         uses: actions/checkout@v4
         with:
