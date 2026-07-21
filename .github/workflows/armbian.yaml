@@ -20,17 +20,22 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Disable Docker (force native build)
+      # ============================================
+      # 关键修复：彻底卸载 Docker，让 Armbian 走原生构建
+      # ============================================
+      - name: Remove Docker completely
         run: |
           sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
-          sudo systemctl disable docker docker.socket containerd 2>/dev/null || true
-          docker info 2>&1 && echo "⚠️ Docker still running!" || echo "✅ Docker disabled"
+          sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras 2>/dev/null || true
+          sudo apt-get autoremove -y
+          sudo rm -rf /var/lib/docker /var/lib/containerd
+          # 确认 docker 命令不存在
+          which docker && echo "⚠️ docker still exists!" || echo "✅ Docker fully removed"
 
       - name: Install QEMU user-static
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support
-          ls /proc/sys/fs/binfmt_misc/ | grep -i qemu || true
 
       - name: Checkout Armbian build framework
         uses: actions/checkout@v4
