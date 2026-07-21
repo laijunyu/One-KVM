@@ -20,16 +20,12 @@ jobs:
           sudo apt-get clean
           df -h
 
-      # ============================================
-      # 关键修复：彻底卸载 Docker，让 Armbian 走原生构建
-      # ============================================
       - name: Remove Docker completely
         run: |
           sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
           sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras 2>/dev/null || true
           sudo apt-get autoremove -y
           sudo rm -rf /var/lib/docker /var/lib/containerd
-          # 确认 docker 命令不存在
           which docker && echo "⚠️ docker still exists!" || echo "✅ Docker fully removed"
 
       - name: Install QEMU user-static
@@ -45,15 +41,18 @@ jobs:
           fetch-depth: 1
 
       # ============================================
-      # 修复补丁冲突：删除与 Orange Pi Zero 无关的坏补丁
-      # (BigTreeTech CB1 是 H616 板子，与你的 H2+ 无关)
+      # 修复：删除坏补丁 + 清理 series.conf 中的引用
       # ============================================
-      - name: Remove broken patches
+      - name: Remove broken patches and clean series.conf
         run: |
           cd armbian-build
+          # 1. 删除补丁文件
           find patch/kernel -name "*bigtreetech-cb1*" -type f -print -delete
+          # 2. 清理 series.conf 中的引用（这才是关键！）
+          find patch/kernel -name "series.conf" -exec sed -i '/bigtreetech-cb1/d' {} \;
+          # 3. 以防万一，也清理其他可能的 series 文件
           find patch/kernel -name "*.series" -exec sed -i '/bigtreetech-cb1/d' {} \;
-          echo "✅ Done"
+          echo "✅ Patches removed and series.conf cleaned"
 
       - name: Build Armbian image
         run: |
