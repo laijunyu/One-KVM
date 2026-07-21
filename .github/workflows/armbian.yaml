@@ -7,7 +7,7 @@ on:
 
 env:
   BOARD: orangepizero
-  BRANCH: edge
+  BRANCH: current
   RELEASE: trixie
 
 jobs:
@@ -20,16 +20,17 @@ jobs:
           sudo apt-get clean
           df -h
 
-      # ============================================
-      # 关键修复：在宿主机上注册 QEMU binfmt
-      # 必须在 Armbian 构建之前执行
-      # ============================================
-      - name: Register QEMU binfmt (fix armhf emulation)
+      - name: Disable Docker (force native build)
         run: |
-          docker run --privileged --rm tonistiigi/binfmt --install all
-          # 验证注册成功
+          sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
+          sudo systemctl disable docker docker.socket containerd 2>/dev/null || true
+          docker info 2>&1 && echo "⚠️ Docker still running!" || echo "✅ Docker disabled"
+
+      - name: Install QEMU user-static
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
           ls /proc/sys/fs/binfmt_misc/ | grep -i qemu || true
-          cat /proc/sys/fs/binfmt_misc/qemu-arm 2>/dev/null || true
 
       - name: Checkout Armbian build framework
         uses: actions/checkout@v4
