@@ -1,158 +1,135 @@
-name: Build sunxi-cedar-mainline for OPi Zero
+name: Build sunxi-cedar for OPi Zero
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      kernel_version:
-        description: 'Target Linux kernel version'
-        required: true
-        default: '6.18.0'
 
 env:
-  TARGET_ARCH: arm
-  CROSS_COMPILE: arm-linux-gnueabihf-
-  KVER: ${{ github.event.inputs.kernel_version || '6.18.0' }}
+  KVER: "6.18"
+  # 正确的内核源码：Linux 主线，不是 armbian/linux
+  KERNEL_REPO: "https://github.com/torvalds/linux.git"
+  KERNEL_TAG: "v6.18"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout source
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            make git wget xz-utils \
+            bc flex bison \
+            libssl-dev libelf-dev
+
+      - name: Clone mainline Linux kernel
+        run: |
+          echo "🔍 Cloning Linux ${KVER} from mainline..."
+          git clone --depth 1 \
+            --branch "${{ env.KERNEL_TAG }}" \
+            "${{ env.KERNEL_REPO }}" kernel-source
+          
+          echo "✅ Kernel source ready"
+          head -5 kernel-source/Makefile
+
+      - name: (Optional) Apply Armbian sunxi patches
+        run: |
+          # Armbian 的 sunxi 补丁位于 armbian/build/patch/kernel/
+          # 对于 6.18 主线，sunxi 支持已基本完整，此步骤可选
+          # 如果你需要特定 Armbian 补丁，取消注释以下内容：
+          
+          # git clone --depth 1 https://github.com/armbian/build.git armbian-build
+          # PATCH_DIR="armbian-build/patch/kernel/archive/sunxi-${KVER}"
+          # if [ -d "$PATCH_DIR" ]; then
+          #   cd kernel-source
+          #   for p in ../${PATCH_DIR}/*.patch; do
+          #     git apply "$p" || echo "⚠️ Skip: $p"
+          #   done
+          #   cd ..
+          # fi
+          
+          echo "ℹ️ Using vanilla mainline kernel (sunxi support is upstream)"
+
+      - name: Prepare kernel build tree
+        run: |
+          cd kernel-source
+          
+          # 使用 sunxi 默认配置
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            sunxi_defconfig
+          
+          # 确保 VE/Cedar 相关选项
+          scripts/config --module CONFIG_VIDEO_SUNXI_CEDAR 2>/dev/null || true
+          scripts/config --enable CONFIG_CMA 2>/dev/null || true
+          
+          # 仅准备模块编译环境
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            modules_prepare -j$(nproc)
+          
+          echo "KERNEL_SRC=$(pwd)" >> $GITHUB_ENV
+          echo "✅ modules_prepare done"
+
+      - name: Checkout sunxi-cedar-mainline
         uses: actions/checkout@v4
         with:
           repository: uboborov/sunxi-cedar-mainline
           path: sunxi-cedar-mainline
 
-      - name: Install cross-compilation toolchain & dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-arm-linux-gnueabihf \
-            g++-arm-linux-gnueabihf \
-            make \
-            git \
-            wget \
-            xz-utils \
-            bc \
-            flex \
-            bison \
-            libssl-dev \
-            libelf-dev
-
-      - name: Download Armbian sunxi kernel headers/source
-        run: |
-          # Armbian 内核源码获取方式：从 Armbian 构建系统或 apt 源获取
-          # 这里使用 Armbian edge sunxi 内核源码作为示例
-          echo "🔍 Fetching linux-sunxi ${KVER} kernel source..."
-          
-          # 方案A: 从 Armbian GitHub Releases 获取内核源码包
-          # 方案B: clone armbian/linux 对应 tag
-          git clone --depth 1 --branch v${KVER} \
-            https://github.com/armbian/linux.git kernel-source 2>/dev/null || \
-          git clone --depth 1 --branch sunxi-${KVER} \
-            https://github.com/armbian/linux.git kernel-source 2>/dev/null || \
-          {
-            echo "⚠️ Exact tag not found, trying armbian/build framework..."
-            git clone --depth 1 https://github.com/armbian/build.git armbian-build
-            cd armbian-build
-            # 仅提取内核配置和补丁，不执行完整构建
-            ./compile.sh BOARD=orangepizero BRANCH=edge KERNEL_ONLY=yes \
-              KERNEL_CONFIGURE=no DOWNLOAD_SOURCES=yes CLEAN_LEVEL="" 2>&1 | tail -50 || true
-            cd ..
-            if [ -d "armbian-build/cache/sources/linux-sunxi" ]; then
-              mv armbian-build/cache/sources/linux-sunxi kernel-source
-            fi
-          }
-
-          if [ ! -d "kernel-source" ]; then
-            echo "❌ Failed to obtain kernel source for ${KVER}"
-            exit 1
-          fi
-
-          # 准备内核构建环境（不实际编译整个内核，仅生成头文件和符号）
-          cd kernel-source
-          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
-            orangepi_zero_defconfig 2>/dev/null || \
-          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
-            sunxi_defconfig
-          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
-            modules_prepare -j$(nproc)
-          echo "KERNEL_SRC=$(pwd)" >> $GITHUB_ENV
-
-      - name: Generate blacklist config
-        run: |
-          cat << 'BLACKLIST_EOF' > sunxi-cedar-blacklist.conf
-          # === sunxi-cedar-mainline 冲突模块黑名单 ===
-          # Orange Pi Zero (H2+) + Linux 6.18
-          # 加载 cedar 编码驱动前必须确保以下模块未加载
-          
-          # 主线 cedrus 解码驱动 - 占用同一 VE 硬件
-          blacklist cedrus
-          blacklist sunxi_cedrus
-          
-          # Hantro VPU 驱动 - 可能与 sunxi VE 冲突
-          blacklist hantro
-          blacklist hantro-vpu
-          
-          # 防止自动加载
-          install cedrus /bin/false
-          install sunxi_cedrus /bin/false
-          install hantro /bin/false
-          BLACKLIST_EOF
-          
-          echo "✅ Blacklist config generated"
-
-      - name: Build sunxi-cedar-mainline kernel module
+      - name: Build cedar kernel module
         run: |
           cd sunxi-cedar-mainline
           
-          echo "🔨 Building against kernel: ${KERNEL_SRC}"
-          echo "📋 Target: ARM32 (armhf) for Allwinner H2+"
-          
-          make ARCH=${TARGET_ARCH} \
-               CROSS_COMPILE=${CROSS_COMPILE} \
-               KDIR=${KERNEL_SRC} \
+          make ARCH=arm \
+               CROSS_COMPILE=arm-linux-gnueabihf- \
+               KDIR=${{ env.KERNEL_SRC }} \
                -j$(nproc) 2>&1 | tee build.log
           
-          # 验证产物
-          KO_FILE=$(find . -name "*.ko" -type f | head -1)
-          if [ -z "${KO_FILE}" ]; then
-            echo "❌ Build failed: no .ko file produced"
-            cat build.log
+          KO=$(find . -name "*.ko" -type f | head -1)
+          if [ -z "$KO" ]; then
+            echo "❌ Build failed - no .ko produced"
+            echo "=== Last 50 lines of build log ==="
+            tail -50 build.log
             exit 1
           fi
           
-          echo "✅ Built successfully: ${KO_FILE}"
-          file "${KO_FILE}"
-          modinfo "${KO_FILE}" 2>/dev/null || true
+          echo "✅ Built: $KO"
+          file "$KO"
+          modinfo "$KO" 2>/dev/null || true
 
-      - name: Package artifacts
+      - name: Package output
         run: |
           mkdir -p output
           cp sunxi-cedar-mainline/*.ko output/ 2>/dev/null || true
-          cp sunxi-cedar-blacklist.conf output/
           
-          # 生成安装说明
-          cat << 'INSTALL_EOF' > output/INSTALL.md
-          # sunxi-cedar-mainline for Orange Pi Zero (H2+)
+          # 黑名单配置
+          cat > output/sunxi-cedar-blacklist.conf << 'EOF'
+          blacklist cedrus
+          blacklist sunxi_cedrus
+          blacklist hantro
+          install cedrus /bin/false
+          install sunxi_cedrus /bin/false
+          install hantro /bin/false
+          EOF
           
-          ## 安装步骤
-          1. 复制 .ko 文件到目标板
-          2. 安装黑名单配置:
-             sudo cp sunxi-cedar-blacklist.conf /etc/modprobe.d/
-             sudo update-initramfs -u
-          3. 卸载冲突模块:
-             sudo modprobe -r cedrus sunxi_cedrus hantro
-          4. 加载 cedar 驱动:
-             sudo insmod sunxi-cedar.ko
-          5. 验证: dmesg | grep -i cedar
-          INSTALL_EOF
+          # 安装脚本
+          cat > output/install.sh << 'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          echo "=== sunxi-cedar encoder driver installer ==="
+          for m in cedrus sunxi_cedrus hantro; do
+            sudo modprobe -r $m 2>/dev/null && echo "  removed $m" || true
+          done
+          sudo cp sunxi-cedar-blacklist.conf /etc/modprobe.d/
+          sudo update-initramfs -u
+          sudo insmod sunxi-cedar.ko
+          dmesg | grep -i cedar | tail -5
+          echo "=== Done ==="
+          SCRIPT
+          chmod +x output/install.sh
 
-      - name: Upload build artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sunxi-cedar-opizero-${{ env.KVER }}
