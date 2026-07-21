@@ -40,17 +40,11 @@ jobs:
           path: armbian-build
           fetch-depth: 1
 
-      # ============================================
-      # 修复：删除坏补丁 + 清理 series.conf 中的引用
-      # ============================================
       - name: Remove broken patches and clean series.conf
         run: |
           cd armbian-build
-          # 1. 删除补丁文件
           find patch/kernel -name "*bigtreetech-cb1*" -type f -print -delete
-          # 2. 清理 series.conf 中的引用（这才是关键！）
           find patch/kernel -name "series.conf" -exec sed -i '/bigtreetech-cb1/d' {} \;
-          # 3. 以防万一，也清理其他可能的 series 文件
           find patch/kernel -name "*.series" -exec sed -i '/bigtreetech-cb1/d' {} \;
           echo "✅ Patches removed and series.conf cleaned"
 
@@ -83,12 +77,21 @@ jobs:
           echo "✅ Image: $IMG"
           ls -lh "$IMG"
 
-      - name: Compress image
+      # ============================================
+      # 修正点 #1: 压缩前移除 ACL 权限
+      # ============================================
+      - name: Compress image (fix ACL permission)
         run: |
+          # 移除文件的 ACL 权限，避免 xz 设置组权限时失败
+          setfacl -b "${{ steps.find_img.outputs.img_path }}"
+          # 执行压缩
           xz -T0 -k "${{ steps.find_img.outputs.img_path }}"
           ls -lh "${{ steps.find_img.outputs.img_path }}.xz"
 
-      - name: Upload image
+      # ============================================
+      # 修正点 #2: 上传正确的 .xz 压缩文件
+      # ============================================
+      - name: Upload compressed image
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.find_img.outputs.img_name }}.xz
