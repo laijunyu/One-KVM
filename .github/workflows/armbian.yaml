@@ -1,189 +1,160 @@
-name: Build and Boot-Test Armbian Image
+name: Build sunxi-cedar-mainline for OPi Zero
 
 on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      release:
-        description: '选择 Debian 发行版'
+      kernel_version:
+        description: 'Target Linux kernel version'
         required: true
-        default: 'bookworm'
-        type: choice
-        options:
-          - bookworm
-      branch:
-        description: '选择内核分支'
-        required: true
-        default: 'current'
-        type: choice
-        options:
-          - current
+        default: '6.18.0'
+
+env:
+  TARGET_ARCH: arm
+  CROSS_COMPILE: arm-linux-gnueabihf-
+  KVER: ${{ github.event.inputs.kernel_version || '6.18.0' }}
 
 jobs:
-  # ==================== 阶段 1：编译镜像 ====================
   build:
-    name: Build Image
     runs-on: ubuntu-24.04
-    outputs:
-      artifact_name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-DynamicIP
     steps:
-      - name: Checkout Code
+      - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          repository: uboborov/sunxi-cedar-mainline
+          path: sunxi-cedar-mainline
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-
-      - name: Install QEMU and Binfmt on Host
+      - name: Install cross-compilation toolchain & dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            make \
+            git \
+            wget \
+            xz-utils \
+            bc \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev
 
-      - name: Disable Docker to Force Native Build
+      - name: Download Armbian sunxi kernel headers/source
         run: |
-          sudo systemctl stop docker.service docker.socket || true
-          sudo systemctl disable docker.service docker.socket || true
-          sudo apt-get remove -y docker-ce docker-ce-cli containerd.io || true
-          sudo apt-get autoremove -y
-
-      - name: Clone Armbian Build Framework
-        run: git clone --depth=1 https://github.com/armbian/build armbian-build
-
-      # ========== 修改点 1：启用 VPU 驱动（解码+编码） ==========
-      - name: Enable Cedrus VPU Driver in Kernel Config
-        run: |
-          mkdir -p armbian-build/userpatches/kernel/sunxi-current
-          cat << 'EOF' > armbian-build/userpatches/kernel/sunxi-current/cedrus-enable.cfg
-          CONFIG_VIDEO_SUNXI_CEDRUS=m
-          CONFIG_VIDEO_SUNXI_CEDRUS_ENC=m
-          CONFIG_MEDIA_CONTROLLER=y
-          CONFIG_V4L2_MEM2MEM_DEV=y
-          EOF
-
-      # ========== 修改点 2 & 3：定制脚本（移除黑名单 + 加载模块） ==========
-      - name: Inject Customize Script
-        run: |
-          mkdir -p armbian-build/userpatches
-          cat << 'EOF' > armbian-build/userpatches/customize-image.sh
-          #!/bin/bash
-          echo "=> Removing blacklist for sunxi_cedrus..."
-          if [ -f /etc/modprobe.d/blacklist-orangepizero.conf ]; then
-            sed -i '/^blacklist sunxi_cedrus/s/^/# /' /etc/modprobe.d/blacklist-orangepizero.conf
-          fi
-          echo "=> Ensuring cedrus module loads at boot..."
-          echo "cedrus" >> /etc/modules
-          echo "=> Customization complete."
-          EOF
-          chmod +x armbian-build/userpatches/customize-image.sh
-
-      - name: Compile Armbian Image
-        run: |
-          cd armbian-build
-          ./compile.sh \
-            BOARD=orangepizero \
-            BRANCH=${{ github.event.inputs.branch }} \
-            RELEASE=${{ github.event.inputs.release }} \
-            BUILD_DESKTOP=no \
-            BUILD_MINIMAL=no \
-            KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,xz \
-            EXPERT=yes \
-            IGNORE_UPDATES=yes
-
-      - name: Upload Output Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Armbian-OrangePiZero-${{ github.event.inputs.release }}-${{ github.event.inputs.branch }}-DynamicIP
-          path: armbian-build/output/images/*.xz
-          retention-days: 7
-
-  # ==================== 阶段 2：QEMU 启动测试 ====================
-  boot-test:
-    name: QEMU Boot Test
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Install QEMU & Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-arm xz-utils
-
-      - name: Download Artifact Image
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact_name }}
-          path: ./workspace
-
-      - name: Extract Boot Files from Image
-        run: |
-          cd ./workspace
-          echo "=> Uncompressing Image..."
-          xz -d *.xz
-          IMAGE_FILE=$(ls *.img | head -n 1)
+          # Armbian 内核源码获取方式：从 Armbian 构建系统或 apt 源获取
+          # 这里使用 Armbian edge sunxi 内核源码作为示例
+          echo "🔍 Fetching linux-sunxi ${KVER} kernel source..."
           
-          echo "=> Mounting image via loop device..."
-          LOOP_DEV=$(sudo losetup -Pf --show "$IMAGE_FILE")
-          
-          sudo mkdir -p /mnt/armbian
-          sudo mount "${LOOP_DEV}p1" /mnt/armbian
-          
-          echo "=> Copying kernel and DTB for QEMU emulation..."
-          mkdir -p ../boot-files
-          
-          # 精准提取单一内核文件
-          KERNEL_SRC=$(ls /mnt/armbian/boot/vmlinuz-* /mnt/armbian/boot/zImage* 2>/dev/null | head -n 1)
-          cp "$KERNEL_SRC" ../boot-files/vmlinuz
-          
-          # 精准提取单一 Initrd 文件
-          INITRD_SRC=$(ls /mnt/armbian/boot/uInitrd* /mnt/armbian/boot/initrd.img-* 2>/dev/null | head -n 1)
-          cp "$INITRD_SRC" ../boot-files/initrd
-          
-          # ========== 修改点：提取正确的设备树（H2+ Orange Pi Zero） ==========
-          DTB_SRC=$(find /mnt/armbian/boot/ -name "sun8i-h2-plus-orangepi-zero.dtb" | head -n 1)
-          cp "$DTB_SRC" ../boot-files/dtb
-          
-          echo "=> Cleaning up mounts..."
-          sudo umount /mnt/armbian
-          sudo losetup -d "$LOOP_DEV"
-          mv "$IMAGE_FILE" ../armbian.img
-
-      - name: Run QEMU Boot Assertion
-        run: |
-          echo "=> Starting QEMU emulation in background..."
-          # ========== 修改点：使用 orangepi-zero 机器类型（若失败可回退） ==========
-          sudo qemu-system-arm \
-            -M orangepi-zero \
-            -m 1024 \
-            -cpu cortex-a7 \
-            -nographic \
-            -dtb boot-files/dtb \
-            -kernel boot-files/vmlinuz \
-            -initrd boot-files/initrd \
-            -append 'earlyprintk loglevel=8 console=ttyS0 root=/dev/mmcblk0p1 ro rootwait' \
-            -drive if=sd,format=raw,file=armbian.img > qemu_serial.log 2>&1 &
-          
-          QEMU_PID=$!
-          
-          TIMEOUT=180
-          BOOT_SUCCESS=false
-          echo "=> Waiting for system to hit login prompt (Timeout: ${TIMEOUT}s)..."
-          
-          for i in $(seq 1 $TIMEOUT); do
-            if grep -E "login:|Reached target Multi-User System|Armbian" qemu_serial.log > /dev/null; then
-              echo "✅ [SUCCESS] 镜像成功启动并进入了系统控制台！"
-              BOOT_SUCCESS=true
-              break
+          # 方案A: 从 Armbian GitHub Releases 获取内核源码包
+          # 方案B: clone armbian/linux 对应 tag
+          git clone --depth 1 --branch v${KVER} \
+            https://github.com/armbian/linux.git kernel-source 2>/dev/null || \
+          git clone --depth 1 --branch sunxi-${KVER} \
+            https://github.com/armbian/linux.git kernel-source 2>/dev/null || \
+          {
+            echo "⚠️ Exact tag not found, trying armbian/build framework..."
+            git clone --depth 1 https://github.com/armbian/build.git armbian-build
+            cd armbian-build
+            # 仅提取内核配置和补丁，不执行完整构建
+            ./compile.sh BOARD=orangepizero BRANCH=edge KERNEL_ONLY=yes \
+              KERNEL_CONFIGURE=no DOWNLOAD_SOURCES=yes CLEAN_LEVEL="" 2>&1 | tail -50 || true
+            cd ..
+            if [ -d "armbian-build/cache/sources/linux-sunxi" ]; then
+              mv armbian-build/cache/sources/linux-sunxi kernel-source
             fi
-            sleep 1
-          done
-          
-          sudo kill $QEMU_PID || true
-          
-          echo "=================== QEMU 串口完整日志 ==================="
-          cat qemu_serial.log
-          echo "========================================================"
-          
-          if [ "$BOOT_SUCCESS" = false ]; then
-            echo "❌ [FAILURE] 镜像未能成功引导，或在 180 秒内未到达登录界面。"
+          }
+
+          if [ ! -d "kernel-source" ]; then
+            echo "❌ Failed to obtain kernel source for ${KVER}"
             exit 1
           fi
+
+          # 准备内核构建环境（不实际编译整个内核，仅生成头文件和符号）
+          cd kernel-source
+          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
+            orangepi_zero_defconfig 2>/dev/null || \
+          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
+            sunxi_defconfig
+          make ARCH=${TARGET_ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
+            modules_prepare -j$(nproc)
+          echo "KERNEL_SRC=$(pwd)" >> $GITHUB_ENV
+
+      - name: Generate blacklist config
+        run: |
+          cat << 'BLACKLIST_EOF' > sunxi-cedar-blacklist.conf
+          # === sunxi-cedar-mainline 冲突模块黑名单 ===
+          # Orange Pi Zero (H2+) + Linux 6.18
+          # 加载 cedar 编码驱动前必须确保以下模块未加载
+          
+          # 主线 cedrus 解码驱动 - 占用同一 VE 硬件
+          blacklist cedrus
+          blacklist sunxi_cedrus
+          
+          # Hantro VPU 驱动 - 可能与 sunxi VE 冲突
+          blacklist hantro
+          blacklist hantro-vpu
+          
+          # 防止自动加载
+          install cedrus /bin/false
+          install sunxi_cedrus /bin/false
+          install hantro /bin/false
+          BLACKLIST_EOF
+          
+          echo "✅ Blacklist config generated"
+
+      - name: Build sunxi-cedar-mainline kernel module
+        run: |
+          cd sunxi-cedar-mainline
+          
+          echo "🔨 Building against kernel: ${KERNEL_SRC}"
+          echo "📋 Target: ARM32 (armhf) for Allwinner H2+"
+          
+          make ARCH=${TARGET_ARCH} \
+               CROSS_COMPILE=${CROSS_COMPILE} \
+               KDIR=${KERNEL_SRC} \
+               -j$(nproc) 2>&1 | tee build.log
+          
+          # 验证产物
+          KO_FILE=$(find . -name "*.ko" -type f | head -1)
+          if [ -z "${KO_FILE}" ]; then
+            echo "❌ Build failed: no .ko file produced"
+            cat build.log
+            exit 1
+          fi
+          
+          echo "✅ Built successfully: ${KO_FILE}"
+          file "${KO_FILE}"
+          modinfo "${KO_FILE}" 2>/dev/null || true
+
+      - name: Package artifacts
+        run: |
+          mkdir -p output
+          cp sunxi-cedar-mainline/*.ko output/ 2>/dev/null || true
+          cp sunxi-cedar-blacklist.conf output/
+          
+          # 生成安装说明
+          cat << 'INSTALL_EOF' > output/INSTALL.md
+          # sunxi-cedar-mainline for Orange Pi Zero (H2+)
+          
+          ## 安装步骤
+          1. 复制 .ko 文件到目标板
+          2. 安装黑名单配置:
+             sudo cp sunxi-cedar-blacklist.conf /etc/modprobe.d/
+             sudo update-initramfs -u
+          3. 卸载冲突模块:
+             sudo modprobe -r cedrus sunxi_cedrus hantro
+          4. 加载 cedar 驱动:
+             sudo insmod sunxi-cedar.ko
+          5. 验证: dmesg | grep -i cedar
+          INSTALL_EOF
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunxi-cedar-opizero-${{ env.KVER }}
+          path: output/
+          retention-days: 30
