@@ -44,6 +44,17 @@ jobs:
           path: armbian-build
           fetch-depth: 1
 
+      # ============================================
+      # 修复补丁冲突：删除与 Orange Pi Zero 无关的坏补丁
+      # (BigTreeTech CB1 是 H616 板子，与你的 H2+ 无关)
+      # ============================================
+      - name: Remove broken patches
+        run: |
+          cd armbian-build
+          find patch/kernel -name "*bigtreetech-cb1*" -type f -print -delete
+          find patch/kernel -name "*.series" -exec sed -i '/bigtreetech-cb1/d' {} \;
+          echo "✅ Done"
+
       - name: Build Armbian image
         run: |
           cd armbian-build
