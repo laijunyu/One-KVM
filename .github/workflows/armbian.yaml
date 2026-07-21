@@ -1,4 +1,4 @@
-name: Build sunxi-cedar for OPi Zero
+name: Build Armbian Image for OPi Zero
 
 on:
   push:
@@ -6,132 +6,64 @@ on:
   workflow_dispatch:
 
 env:
-  KVER: "6.18"
-  # 正确的内核源码：Linux 主线，不是 armbian/linux
-  KERNEL_REPO: "https://github.com/torvalds/linux.git"
-  KERNEL_TAG: "v6.18"
+  BOARD: orangepizero
+  BRANCH: edge
+  RELEASE: trixie
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Install cross-compilation toolchain
+      - name: Free disk space
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-arm-linux-gnueabihf \
-            make git wget xz-utils \
-            bc flex bison \
-            libssl-dev libelf-dev
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
 
-      - name: Clone mainline Linux kernel
-        run: |
-          echo "🔍 Cloning Linux ${KVER} from mainline..."
-          git clone --depth 1 \
-            --branch "${{ env.KERNEL_TAG }}" \
-            "${{ env.KERNEL_REPO }}" kernel-source
-          
-          echo "✅ Kernel source ready"
-          head -5 kernel-source/Makefile
-
-      - name: (Optional) Apply Armbian sunxi patches
-        run: |
-          # Armbian 的 sunxi 补丁位于 armbian/build/patch/kernel/
-          # 对于 6.18 主线，sunxi 支持已基本完整，此步骤可选
-          # 如果你需要特定 Armbian 补丁，取消注释以下内容：
-          
-          # git clone --depth 1 https://github.com/armbian/build.git armbian-build
-          # PATCH_DIR="armbian-build/patch/kernel/archive/sunxi-${KVER}"
-          # if [ -d "$PATCH_DIR" ]; then
-          #   cd kernel-source
-          #   for p in ../${PATCH_DIR}/*.patch; do
-          #     git apply "$p" || echo "⚠️ Skip: $p"
-          #   done
-          #   cd ..
-          # fi
-          
-          echo "ℹ️ Using vanilla mainline kernel (sunxi support is upstream)"
-
-      - name: Prepare kernel build tree
-        run: |
-          cd kernel-source
-          
-          # 使用 sunxi 默认配置
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-            sunxi_defconfig
-          
-          # 确保 VE/Cedar 相关选项
-          scripts/config --module CONFIG_VIDEO_SUNXI_CEDAR 2>/dev/null || true
-          scripts/config --enable CONFIG_CMA 2>/dev/null || true
-          
-          # 仅准备模块编译环境
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-            modules_prepare -j$(nproc)
-          
-          echo "KERNEL_SRC=$(pwd)" >> $GITHUB_ENV
-          echo "✅ modules_prepare done"
-
-      - name: Checkout sunxi-cedar-mainline
+      - name: Checkout Armbian build framework
         uses: actions/checkout@v4
         with:
-          repository: uboborov/sunxi-cedar-mainline
-          path: sunxi-cedar-mainline
+          repository: armbian/build
+          path: armbian-build
+          fetch-depth: 1
 
-      - name: Build cedar kernel module
+      - name: Build Armbian image
         run: |
-          cd sunxi-cedar-mainline
-          
-          make ARCH=arm \
-               CROSS_COMPILE=arm-linux-gnueabihf- \
-               KDIR=${{ env.KERNEL_SRC }} \
-               -j$(nproc) 2>&1 | tee build.log
-          
-          KO=$(find . -name "*.ko" -type f | head -1)
-          if [ -z "$KO" ]; then
-            echo "❌ Build failed - no .ko produced"
-            echo "=== Last 50 lines of build log ==="
-            tail -50 build.log
+          cd armbian-build
+          ./compile.sh build \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=yes \
+            KERNEL_CONFIGURE=no \
+            CLEAN_LEVEL="" \
+            NO_HOST_RELEASE_CHECK=yes \
+            EXPERT=yes \
+            2>&1 | tee build.log
+
+      - name: Find output image
+        id: find_img
+        run: |
+          IMG=$(find armbian-build/output/images -name "*.img" -type f | head -1)
+          if [ -z "$IMG" ]; then
+            echo "❌ No .img found"
+            find armbian-build/output -type f | head -20
             exit 1
           fi
-          
-          echo "✅ Built: $KO"
-          file "$KO"
-          modinfo "$KO" 2>/dev/null || true
+          echo "img_path=$IMG" >> $GITHUB_OUTPUT
+          echo "img_name=$(basename $IMG)" >> $GITHUB_OUTPUT
+          echo "✅ Image: $IMG"
+          ls -lh "$IMG"
 
-      - name: Package output
+      - name: Compress image
         run: |
-          mkdir -p output
-          cp sunxi-cedar-mainline/*.ko output/ 2>/dev/null || true
-          
-          # 黑名单配置
-          cat > output/sunxi-cedar-blacklist.conf << 'EOF'
-          blacklist cedrus
-          blacklist sunxi_cedrus
-          blacklist hantro
-          install cedrus /bin/false
-          install sunxi_cedrus /bin/false
-          install hantro /bin/false
-          EOF
-          
-          # 安装脚本
-          cat > output/install.sh << 'SCRIPT'
-          #!/bin/bash
-          set -euo pipefail
-          echo "=== sunxi-cedar encoder driver installer ==="
-          for m in cedrus sunxi_cedrus hantro; do
-            sudo modprobe -r $m 2>/dev/null && echo "  removed $m" || true
-          done
-          sudo cp sunxi-cedar-blacklist.conf /etc/modprobe.d/
-          sudo update-initramfs -u
-          sudo insmod sunxi-cedar.ko
-          dmesg | grep -i cedar | tail -5
-          echo "=== Done ==="
-          SCRIPT
-          chmod +x output/install.sh
+          xz -T0 -k "${{ steps.find_img.outputs.img_path }}"
+          ls -lh "${{ steps.find_img.outputs.img_path }}.xz"
 
-      - name: Upload artifacts
+      - name: Upload image
         uses: actions/upload-artifact@v4
         with:
-          name: sunxi-cedar-opizero-${{ env.KVER }}
-          path: output/
-          retention-days: 30
+          name: ${{ steps.find_img.outputs.img_name }}.xz
+          path: ${{ steps.find_img.outputs.img_path }}.xz
+          retention-days: 14
