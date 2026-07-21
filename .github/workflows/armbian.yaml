@@ -78,19 +78,15 @@ jobs:
           ls -lh "$IMG"
 
       # ============================================
-      # 修正点 #1: 压缩前移除 ACL 权限
+      # 关键修复：chown 改组后再压缩
       # ============================================
-      - name: Compress image (fix ACL permission)
+      - name: Compress image
         run: |
-          # 移除文件的 ACL 权限，避免 xz 设置组权限时失败
-          setfacl -b "${{ steps.find_img.outputs.img_path }}"
-          # 执行压缩
-          xz -T0 -k "${{ steps.find_img.outputs.img_path }}"
-          ls -lh "${{ steps.find_img.outputs.img_path }}.xz"
+          IMG="${{ steps.find_img.outputs.img_path }}"
+          sudo chown runner:runner "$IMG"
+          xz -T0 -k "$IMG"
+          ls -lh "${IMG}.xz"
 
-      # ============================================
-      # 修正点 #2: 上传正确的 .xz 压缩文件
-      # ============================================
       - name: Upload compressed image
         uses: actions/upload-artifact@v4
         with:
